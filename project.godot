@@ -1,0 +1,29 @@
+; Engine configuration file.
+; privchat-godot-demo — PrivChat 通信验证演示工程
+; 依赖：../privchat-godot/addons/privchat（通过 addons 目录软链接引入）
+
+config_version=5
+
+[application]
+
+config/name="PrivchatGodotDemo"
+run/main_scene="res://scenes/login.tscn"
+config/features=PackedStringArray("4.3")
+
+[autoload]
+
+PrivchatSession="*res://scripts/privchat_session.gd"
+
+[display]
+
+window/size/viewport_width=960
+window/size/viewport_height=640
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/privchat/plugin.cfg")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
