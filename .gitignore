@@ -7,4 +7,4 @@
 # Note: addons/privchat is a symlink to ../privchat-godot/addons/privchat
 # (the privchat Godot addon). Restore by checking out privchat-godot next
 # to this repo and recreating the link if lost:
-#   ln -sfn ../privchat-godot/addons/privchat addons/privchat
+#   ln -sfn ../../privchat-godot/addons/privchat addons/privchat

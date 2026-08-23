@@ -49,7 +49,7 @@ func _run() -> void:
 		return
 	print("sms_code = %s" % code)
 
-	print("== [4/5] login 分步：sms-login -> authenticate -> connect ==")
+	print("== [4/5] login 分步：sms-login -> authenticate -> connect -> bootstrap ==")
 	var device := PrivchatPlatformAuthClient.default_device_info()
 	print("device_id = %s" % device.deviceId)
 	var http_resp: Dictionary = await client._ensure_auth().login_with_sms(MOBILE, code, device)
@@ -78,6 +78,15 @@ func _run() -> void:
 	print("connect -> ", JSON.stringify(conn_resp))
 	if not conn_resp.ok:
 		print("VERIFY_FAILED: connect")
+		quit(1)
+		return
+
+	# bootstrap 是本地优先门禁：不完成它，后续发消息等本地操作全部被
+	# SDK 拒绝（invalid state: run_bootstrap_sync required），登录不算成功。
+	var boot_resp: Dictionary = await client.bootstrap_sync()
+	print("bootstrap -> ", JSON.stringify(boot_resp))
+	if not boot_resp.ok:
+		print("VERIFY_FAILED: bootstrap_sync")
 		quit(1)
 		return
 	client.logged_in_user_id = data.user_id
