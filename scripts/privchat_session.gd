@@ -15,6 +15,15 @@ func begin(c: PrivchatClient, uid: int, did: String, mob: String) -> void:
 	user_id = uid
 	device_id = did
 	mobile = mob
+	# 登录态不可自愈(ForcedLogout)时统一处理:清会话、回登录页(spec §7.1)。
+	if not client.session_expired.is_connected(_on_session_expired):
+		client.session_expired.connect(_on_session_expired)
+
+
+func _on_session_expired(code: int, message: String, _source: String) -> void:
+	push_warning("[privchat] session expired (%d): %s" % [code, message])
+	logout()
+	get_tree().change_scene_to_file("res://scenes/login.tscn")
 
 
 func has_session() -> bool:
