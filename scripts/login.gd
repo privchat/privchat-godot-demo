@@ -10,6 +10,16 @@ var status_label: RichTextLabel
 
 var _sending_code := false
 var _logging_in := false
+# 登录前的临时 client(发验证码等 HTTP 用);登录成功后升级为会话级 client
+# 移交给 PrivchatSession,失败则留在本场景复用。
+var _prelogin_client: PrivchatClient = null
+
+
+func _client_for_auth() -> PrivchatClient:
+	if _prelogin_client == null:
+		_prelogin_client = PrivchatClient.new()
+		add_child(_prelogin_client)
+	return _prelogin_client
 
 
 func _ready() -> void:
@@ -104,7 +114,7 @@ func _on_send_code_pressed() -> void:
 	_sending_code = true
 	send_code_btn.disabled = true
 	_append_status("发送验证码 → %s ..." % mobile)
-	var resp: Dictionary = await client.send_sms_code(mobile)
+	var resp: Dictionary = await _client_for_auth().send_sms_code(mobile)
 	_sending_code = false
 	send_code_btn.disabled = false
 	if resp.ok:
@@ -125,8 +135,13 @@ func _on_login_pressed() -> void:
 	login_btn.disabled = true
 	_append_status("登录中 ...")
 	# 会话级 client 挂在 autoload 下，跨场景存活（对标 DemoChatScene）。
-	var client := PrivchatClient.new()
-	PrivchatSession.add_child(client)
+	# 复用登录前的临时 client(里面已有验证码会话),移交给 autoload。
+	var client := _client_for_auth()
+	_prelogin_client = null
+	if client.get_parent() != null:
+		client.reparent(PrivchatSession)
+	else:
+		PrivchatSession.add_child(client)
 	client.connection_state_changed.connect(_on_connection_state_changed)
 	client.sdk_event.connect(_on_sdk_event)
 	var resp: Dictionary = await client.login(mobile, code)

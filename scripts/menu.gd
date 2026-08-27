@@ -35,6 +35,15 @@ func _ready() -> void:
 
 	root.add_child(_spacer())
 
+	# --- 会话列表(top 优先、时间降序;带未读角标)---
+	var list_title := Label.new()
+	root.add_child(list_title)
+	var conv_list := VBoxContainer.new()
+	root.add_child(conv_list)
+	_load_conversations(list_title, conv_list)
+
+	root.add_child(_spacer())
+
 	var logout_btn := Button.new()
 	logout_btn.text = "退出登录"
 	logout_btn.pressed.connect(_on_logout_pressed)
@@ -44,6 +53,37 @@ func _ready() -> void:
 	state_label.text = "连接状态：%s" % PrivchatSession.client.connection_state()
 	state_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
 	root.add_child(state_label)
+
+
+func _load_conversations(title: Label, container: VBoxContainer) -> void:
+	var client: PrivchatClient = PrivchatSession.client
+	var total: Dictionary = await client.get_total_unread_count()
+	var list_resp: Dictionary = await client.list_channels(20)
+	if not list_resp.ok:
+		title.text = "会话列表加载失败：%s" % list_resp.error
+		return
+	title.text = "会话（总未读 %d）" % (total.count if total.ok else 0)
+	for c in list_resp.channels:
+		var cid := int(c.get("channel_id", 0))
+		var name := str(c.get("channel_name", ""))
+		if name.is_empty():
+			var peer = c.get("peer_user_id")
+			name = ("与 %s 的会话" % str(peer)) if peer != null else "频道 %d" % cid
+		var unread := int(c.get("unread_count", 0))
+		var badge := ("  [未读 %d]" % unread) if unread > 0 else ""
+		var preview := str(c.get("last_msg_content", ""))
+		if preview.length() > 18:
+			preview = preview.substr(0, 18) + "…"
+		var row := Button.new()
+		row.text = "%s%s  %s" % [name, badge, preview]
+		row.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		row.pressed.connect(func(): get_tree().change_scene_to_file("res://scenes/chat.tscn"))
+		container.add_child(row)
+	if list_resp.channels.is_empty():
+		var empty := Label.new()
+		empty.text = "（暂无会话）"
+		empty.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+		container.add_child(empty)
 
 
 func _spacer() -> Control:

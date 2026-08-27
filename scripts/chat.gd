@@ -1,6 +1,6 @@
-# chat.gd — 单聊场景（对标 privchat-cocos-demo 好友选择 + mountChatView）
-# 流程：输入对方 uid → get_or_create_direct_channel → sync → 收发消息
-# 简化点：好友列表（SdkFriendsSource）以手动输入 peer uid 代替。
+# chat.gd — 单聊场景(chat facade 版)
+# 流程:输入对方 uid → ChatService.open(local-first 历史) → 收发消息
+#      → 上滑加载更早 → 自动已读(会话打开期间收到即读)
 extends Control
 
 const CHANNEL_TYPE_DIRECT := 1
@@ -9,12 +9,16 @@ var peer_edit: LineEdit
 var msg_edit: LineEdit
 var send_btn: Button
 var open_btn: Button
+var older_btn: Button
 var list: RichTextLabel
 var status_label: Label
 
 var channel_id: int = -1
 var client: PrivchatClient = null
+var chat: PrivchatChatService = null
 var _rendered_message_ids := {}
+var _earliest_server_message_id: int = 0
+var _has_more_before := false
 
 
 func _ready() -> void:
@@ -22,7 +26,12 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/login.tscn")
 		return
 	client = PrivchatSession.client
-	client.sdk_event.connect(_on_sdk_event)
+	chat = PrivchatChatService.new()
+	add_child(chat)
+	chat.setup(client)
+	chat.message_received.connect(_on_message_received)
+	chat.send_status_changed.connect(_on_send_status)
+	chat.unread_changed.connect(_on_unread_changed)
 	_build_ui()
 
 
@@ -59,6 +68,12 @@ func _build_ui() -> void:
 	open_btn.text = "打开会话"
 	open_btn.pressed.connect(_on_open_pressed)
 	open_row.add_child(open_btn)
+
+	older_btn = Button.new()
+	older_btn.text = "↑ 加载更早"
+	older_btn.disabled = true
+	older_btn.pressed.connect(_on_load_older_pressed)
+	root.add_child(older_btn)
 
 	list = RichTextLabel.new()
 	list.bbcode_enabled = true
@@ -97,16 +112,64 @@ func _on_open_pressed() -> void:
 		return
 	open_btn.disabled = true
 	status_label.text = "打开会话中 ..."
-	# 对标 cocos：进入聊天前拿 channel + 一次性 sync（get_or_create_direct_channel 内部已含 sync）。
 	var resp: Dictionary = await client.get_or_create_direct_channel(peer)
-	open_btn.disabled = false
 	if not resp.ok:
+		open_btn.disabled = false
 		status_label.text = "打开会话失败：%s" % resp.error
-		_append("[color=red]打开会话失败：%s[/color]" % resp.error)
 		return
 	channel_id = resp.channel_id
-	status_label.text = "会话 channel_id=%d（type=direct）" % channel_id
-	_append("[color=gray]会话已就绪 channel_id=%d[/color]" % channel_id)
+
+	# local-first 历史:本地为渲染真源,空会话自动补一次最新窗口。
+	var page: Dictionary = await chat.open(channel_id, CHANNEL_TYPE_DIRECT)
+	open_btn.disabled = false
+	if not page.ok:
+		status_label.text = "拉历史失败：%s" % page.error
+		return
+	list.clear()
+	_rendered_message_ids.clear()
+	# SDK 返回显示序 DESC(最新在前);倒序渲染成聊天窗惯例的旧→新。
+	var msgs: Array = page.messages.duplicate()
+	msgs.reverse()
+	for m in msgs:
+		_render_stored(m)
+	_track_paging(page)
+	status_label.text = "会话 channel_id=%d,历史 %d 条" % [channel_id, msgs.size()]
+	_mark_read_latest(msgs)
+
+
+func _on_load_older_pressed() -> void:
+	if not _has_more_before or _earliest_server_message_id <= 0:
+		return
+	older_btn.disabled = true
+	var page: Dictionary = await chat.load_older(_earliest_server_message_id)
+	if page.ok:
+		var msgs: Array = page.messages.duplicate()
+		msgs.reverse()
+		# 插到顶部:重建文本(demo 简化;正式 UI 用 ItemList/ScrollContainer)。
+		var old_text := list.get_parsed_text()
+		list.clear()
+		for m in msgs:
+			_render_stored(m)
+		list.append_text(old_text)
+		_track_paging(page)
+	older_btn.disabled = not _has_more_before
+
+
+func _track_paging(page: Dictionary) -> void:
+	_has_more_before = bool(page.has_more_before)
+	for m in page.messages:
+		var sid := int(m.get("server_message_id", 0))
+		if sid > 0 and (_earliest_server_message_id == 0 or sid < _earliest_server_message_id):
+			_earliest_server_message_id = sid
+	older_btn.disabled = not _has_more_before
+
+
+func _mark_read_latest(msgs: Array) -> void:
+	var max_pts := 0
+	for m in msgs:
+		max_pts = max(max_pts, int(m.get("pts", 0)))
+	if max_pts > 0:
+		await chat.mark_read(max_pts)
 
 
 func _on_send_pressed() -> void:
@@ -117,44 +180,36 @@ func _on_send_pressed() -> void:
 	if content.is_empty():
 		return
 	msg_edit.clear()
-	var resp: Dictionary = await client.send_text(channel_id, CHANNEL_TYPE_DIRECT, content)
+	var resp: Dictionary = await chat.send_text(content)
 	if resp.ok:
 		_append("[color=gray]（已入队，等待投递回执事件）[/color]")
 	else:
 		_append("[color=red]发送失败：%s[/color]" % resp.error)
 
 
-func _on_sdk_event(_sequence_id: int, _timestamp_ms: int, kind: String, event_json: String) -> void:
-	var parsed = JSON.parse_string(event_json)
-	if typeof(parsed) != TYPE_DICTIONARY:
-		return
-	var event: Dictionary = parsed.get("event", {})
-	match kind:
-		"TimelineUpdated":
-			# Rust SDK 本地优先模型：没有 NewMessage 事件，新消息以
-			# TimelineUpdated(channel_id, message_id) 通知，内容用
-			# get_message_by_id 从本地时间线取。
-			var t: Dictionary = event.get("TimelineUpdated", {})
-			if channel_id < 0 or int(t.get("channel_id", -1)) != channel_id:
-				return
-			var message_id: int = int(t.get("message_id", 0))
-			if message_id <= 0 or _rendered_message_ids.has(message_id):
-				return
-			_rendered_message_ids[message_id] = true
-			_render_message(message_id)
-		"MessageSendStatusChanged":
-			var s: Dictionary = event.get("MessageSendStatusChanged", {})
-			_append("[color=gray]投递状态 message_id=%s → %s[/color]" % [
-				str(s.get("message_id", "?")), str(s.get("status", "?"))])
+func _on_message_received(m: Dictionary) -> void:
+	_render_stored(m)
+	# 会话开着就即时已读。
+	var pts := int(m.get("pts", 0))
+	if pts > 0:
+		chat.mark_read(pts)
 
 
-func _render_message(message_id: int) -> void:
-	var resp: Dictionary = await client.get_message_by_id(message_id)
-	if not resp.ok or resp.is_empty() or not resp.has("data"):
+func _on_send_status(message_id: int, status: int, _server_message_id: int) -> void:
+	_append("[color=gray]投递状态 message_id=%d → %d[/color]" % [message_id, status])
+
+
+func _on_unread_changed(_cid: int, count: int) -> void:
+	if channel_id > 0:
+		status_label.text = "会话 channel_id=%d,未读 %d" % [channel_id, count]
+
+
+func _render_stored(m: Dictionary) -> void:
+	var message_id := int(m.get("message_id", 0))
+	if message_id > 0 and _rendered_message_ids.has(message_id):
 		return
-	var m: Dictionary = resp.data
-	if int(m.get("channel_id", -1)) != channel_id:
-		return
+	if message_id > 0:
+		_rendered_message_ids[message_id] = true
 	var from_uid: int = int(m.get("from_uid", 0))
 	var content: String = str(m.get("content", ""))
 	var who := "我" if from_uid == PrivchatSession.user_id else "对方(%d)" % from_uid

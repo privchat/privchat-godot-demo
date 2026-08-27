@@ -29,9 +29,17 @@ func _initialize() -> void:
 
 
 ## 防止任何环节永久挂起（如 authenticate 挂死）—— 超时强制退出。
+## 用挂在树上的 Timer 节点而非 create_timer()：SceneTreeTimer 是树外对象，
+## 成功路径提前 quit() 时不会被回收，会触发 "ObjectDB instances leaked at
+## exit"；树上的节点随场景树析构正常释放。
 func _watchdog() -> void:
-	await create_timer(100.0).timeout
-	_fail("watchdog timeout")
+	# autostart:_initialize 时刻节点尚未进入运行中的树,直接 start() 会被拒。
+	var t := Timer.new()
+	t.wait_time = 100.0
+	t.one_shot = true
+	t.autostart = true
+	t.timeout.connect(func() -> void: _fail("watchdog timeout"))
+	root.add_child(t)
 
 
 func _fail(step: String) -> void:
