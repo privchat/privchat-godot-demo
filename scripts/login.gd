@@ -163,7 +163,7 @@ func _on_connection_state_changed(from_state: String, to_state: String) -> void:
 
 
 func _on_sdk_event(sequence_id: int, _timestamp_ms: int, kind: String,
-		_event_json: String) -> void:
+		_event: Dictionary) -> void:
 	# 登录场景只关注关键事件，其余静默。
 	match kind:
 		"BootstrapCompleted", "SyncStateChanged", "ConnectionStateChanged", \

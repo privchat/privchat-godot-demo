@@ -65,8 +65,8 @@ func _run() -> void:
 	var uid_a: int = a.user_id
 	var uid_b: int = b.user_id
 	print("A user_id=%d, B user_id=%d" % [uid_a, uid_b])
-	client_a.sdk_event.connect(func(seq, ts, kind, json): events_a.append({"kind": kind, "json": json}))
-	client_b.sdk_event.connect(func(seq, ts, kind, json): events_b.append({"kind": kind, "json": json}))
+	client_a.sdk_event.connect(func(seq, _ts, kind, event): events_a.append({"kind": kind, "seq": seq, "event": event}))
+	client_b.sdk_event.connect(func(seq, _ts, kind, event): events_b.append({"kind": kind, "seq": seq, "event": event}))
 
 	print("== [2/5] A 打开与 B 的单聊并发送 ==")
 	var ch_resp: Dictionary = await client_a.get_or_create_direct_channel(uid_b)
@@ -94,7 +94,7 @@ func _run() -> void:
 	for e in events_a:
 		if e.kind == "MessageSendStatusChanged":
 			got_status = true
-			print("A status event: %s" % e.json)
+			print("A status event: %s" % JSON.stringify(e.event))
 			break
 	if not got_status:
 		print("WARN: 未收到 MessageSendStatusChanged（非致命，继续）")
@@ -221,13 +221,10 @@ func _wait_subscription_message(events: Array, channel_id: int, content: String,
 		for e in events:
 			if e.kind != "SubscriptionMessageReceived":
 				continue
-			if seen.has(e.json):
+			if seen.has(e.seq):
 				continue
-			seen[e.json] = true
-			var parsed = JSON.parse_string(e.json)
-			if typeof(parsed) != TYPE_DICTIONARY:
-				continue
-			var s: Dictionary = parsed.get("event", {}).get("SubscriptionMessageReceived", {})
+			seen[e.seq] = true
+			var s: Dictionary = e.event.get("event", {}).get("SubscriptionMessageReceived", {})
 			if int(s.get("channel_id", -1)) != channel_id:
 				continue
 			var bytes := PackedByteArray()
@@ -251,20 +248,17 @@ func _wait_new_message(client: PrivchatClient, events: Array, channel_id: int, c
 		for e in events:
 			if e.kind != "TimelineUpdated":
 				continue
-			if seen.has(e.json):
+			if seen.has(e.seq):
 				continue
-			seen[e.json] = true
-			var parsed = JSON.parse_string(e.json)
-			if typeof(parsed) != TYPE_DICTIONARY:
-				continue
-			var t: Dictionary = parsed.get("event", {}).get("TimelineUpdated", {})
+			seen[e.seq] = true
+			var t: Dictionary = e.event.get("event", {}).get("TimelineUpdated", {})
 			if int(t.get("channel_id", -1)) != channel_id:
 				continue
 			var message_id: int = int(t.get("message_id", 0))
 			if message_id <= 0:
 				continue
 			var resp: Dictionary = await client.get_message_by_id(message_id)
-			if not resp.ok or not resp.has("data"):
+			if not resp.ok or typeof(resp.data) != TYPE_DICTIONARY:
 				continue
 			var m: Dictionary = resp.data
 			if str(m.get("content", "")) == content:

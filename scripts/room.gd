@@ -139,11 +139,8 @@ func _on_unsubscribe_pressed() -> void:
 		unsub_btn.disabled = false
 
 
-func _on_sdk_event(_sequence_id: int, _timestamp_ms: int, kind: String, event_json: String) -> void:
-	var parsed = JSON.parse_string(event_json)
-	if typeof(parsed) != TYPE_DICTIONARY:
-		return
-	var event: Dictionary = parsed.get("event", {})
+func _on_sdk_event(_sequence_id: int, _timestamp_ms: int, kind: String, seq_event: Dictionary) -> void:
+	var event: Dictionary = seq_event.get("event", {})
 	match kind:
 		"TimelineUpdated":
 			# 本地时间线变更（含历史回放落库），按 message_id 取内容渲染。
@@ -170,7 +167,7 @@ func _on_sdk_event(_sequence_id: int, _timestamp_ms: int, kind: String, event_js
 
 func _render_message(message_id: int) -> void:
 	var resp: Dictionary = await client.get_message_by_id(message_id)
-	if not resp.ok or not resp.has("data"):
+	if not resp.ok or typeof(resp.data) != TYPE_DICTIONARY:
 		return
 	var m: Dictionary = resp.data
 	if int(m.get("channel_id", -1)) != subscribed_id:
