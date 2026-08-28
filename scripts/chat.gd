@@ -35,6 +35,14 @@ func _ready() -> void:
 	_build_ui()
 
 
+## 切场景前先 close():排空在途请求并断信号,避免协程状态泄漏。
+func _on_back() -> void:
+	if chat != null:
+		await chat.close()
+		chat = null
+	get_tree().change_scene_to_file("res://scenes/menu.tscn")
+
+
 func _build_ui() -> void:
 	var root := VBoxContainer.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -48,7 +56,7 @@ func _build_ui() -> void:
 	root.add_child(header)
 	var back_btn := Button.new()
 	back_btn.text = "< 返回"
-	back_btn.pressed.connect(func(): get_tree().change_scene_to_file("res://scenes/menu.tscn"))
+	back_btn.pressed.connect(_on_back)
 	header.add_child(back_btn)
 	var title := Label.new()
 	title.text = "  单聊"
