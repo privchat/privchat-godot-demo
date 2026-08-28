@@ -118,6 +118,19 @@ func _run() -> void:
 	sub.channel_id = 0
 	await sub.close()
 
+	print("== [6b] 二进制 transfer 承载含 NUL 的负载 ==")
+	# FlatBuffers 风格负载:内嵌 NUL + 非 UTF-8 字节。字符串版 transfer 会
+	# 在 \0 处截断;二进制版必须原样送达(此处无 game 频道,断言重点是
+	# 不被本地参数校验拒绝、且返回结构正确)。
+	var blob := PackedByteArray([0x00, 0xFF, 0x41, 0x00, 0xFE, 0x42])
+	var tb: Dictionary = await client.transfer_bytes(ch.channel_id, "game/room/heartbeat", blob, 3000)
+	_check(tb.has("code") and tb.has("data") and typeof(tb.data) == TYPE_PACKED_BYTE_ARRAY,
+			"transfer_bytes returns { code, data: PackedByteArray }")
+	_check(not str(tb.error).contains("utf-8"),
+			"binary body not rejected as invalid utf-8: %s" % str(tb.error))
+	var empty_tb: Dictionary = await client.transfer_bytes(ch.channel_id, "game/room/heartbeat", PackedByteArray(), 3000)
+	_check(empty_tb.has("code"), "empty binary body accepted")
+
 	print("== [6/6] 超时后迟到结果不泄漏 ==")
 	var before: int = client._results.size()
 	# 1ms 超时护栏必定先于 native 应答返回,随后结果迟到。
