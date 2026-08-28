@@ -53,7 +53,7 @@ func _run() -> void:
 	var game := DemoGameService.new()
 	root.add_child(game)
 	game.setup(client)
-	game.game_event.connect(func(text, _bytes, publisher, sid, _ts):
+	game.game_event.connect(func(text, _bytes, _topic, publisher, sid, _ts):
 		game_events.append({"text": text, "publisher": publisher, "sid": sid}))
 
 	print("== [2/5] 创建 room -> ticket -> join ==")

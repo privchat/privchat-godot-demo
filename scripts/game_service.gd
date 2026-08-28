@@ -15,7 +15,7 @@ extends Node
 
 ## 服务端游戏广播(已去重)。payload_text 通常是 JSON 文本,由业务自行解析。
 signal game_event(payload_text: String, payload_bytes: PackedByteArray,
-		publisher: String, server_message_id: int, timestamp: int)
+		topic: String, publisher: String, server_message_id: int, timestamp: int)
 ## 重连后自动重订阅的结果;失败(如票据过期)由业务重新签票再 join。
 signal rejoined(ok: bool, error: String)
 
@@ -110,5 +110,7 @@ func _parse_transfer(resp: Dictionary, request_id: int) -> Dictionary:
 
 
 func _on_message(payload_text: String, payload_bytes: PackedByteArray,
-		publisher: String, server_message_id: int, timestamp: int) -> void:
-	game_event.emit(payload_text, payload_bytes, publisher, server_message_id, timestamp)
+		topic: String, publisher: String, server_message_id: int,
+		timestamp: int) -> void:
+	game_event.emit(payload_text, payload_bytes, topic, publisher,
+			server_message_id, timestamp)
