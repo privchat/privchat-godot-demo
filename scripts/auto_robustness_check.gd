@@ -63,7 +63,7 @@ func _run() -> void:
 	raw.queue_free()
 
 	print("== [2/6] 未 join 就 send_command ==")
-	var g0 := PrivchatGameService.new()
+	var g0 := DemoGameService.new()
 	root.add_child(g0)
 	g0.setup(raw)
 	var c0: Dictionary = await g0.send_command("game/test", {})
@@ -102,21 +102,21 @@ func _run() -> void:
 	_check(client.inflight_count() == 0, "close() drains in-flight requests")
 
 	print("== [5/6] 连接状态抖动不叠加重订阅 ==")
-	var chat2 := PrivchatChatService.new()
-	root.add_child(chat2)
-	chat2.setup(client)
+	var sub := PrivchatSubscription.new()
+	root.add_child(sub)
+	sub.setup(client)
 	var rejoins: Array = []
-	chat2.room_rejoined.connect(func(ok, err): rejoins.append({"ok": ok, "error": err}))
-	# 伪造已加入 room 状态,再连发多次状态迁移。
-	chat2.room_channel_id = 999999
+	sub.resubscribed.connect(func(ok, err): rejoins.append({"ok": ok, "error": err}))
+	# 伪造已订阅状态,再连发多次状态迁移。
+	sub.channel_id = 999999
 	for i in range(5):
 		client.connection_state_changed.emit("Connecting", "Authenticated")
 	for i in range(60):
 		await process_frame
 	_check(rejoins.size() <= 1,
 			"flapping state issues at most one resubscribe (got %d)" % rejoins.size())
-	chat2.room_channel_id = 0
-	await chat2.close()
+	sub.channel_id = 0
+	await sub.close()
 
 	print("== [6/6] 超时后迟到结果不泄漏 ==")
 	var before: int = client._results.size()

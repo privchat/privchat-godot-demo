@@ -50,7 +50,7 @@ func _run() -> void:
 		return
 	var client: PrivchatClient = a.client
 	print("user_id=%d" % a.user_id)
-	var game := PrivchatGameService.new()
+	var game := DemoGameService.new()
 	root.add_child(game)
 	game.setup(client)
 	game.game_event.connect(func(text, _bytes, publisher, sid, _ts):
