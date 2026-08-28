@@ -121,8 +121,10 @@ func _run() -> void:
 	_check(c2.logged_in_user_id == -1, "session cleared on terminal failure")
 	# 不得进入无限刷新循环:再触发一次仍是终态,且不产生额外 logout 风暴。
 	var r5b: Dictionary = await c2.refresh_now()
-	_check(not r5b.ok, "second attempt still fails (no silent success)")
-	_check(logouts2.size() <= 2, "no logout storm (got %d)" % logouts2.size())
+	_check(not r5b.ok and str(r5b.error) == "NO_SESSION",
+			"refresh after cleared session returns NO_SESSION: %s" % str(r5b.error))
+	_check(logouts2.size() == 1,
+			"logout_required broadcast once per generation (got %d)" % logouts2.size())
 
 	print("== [6/7] 竞态:刷新期间断线 ==")
 	var c3_login = await _login(MOBILE, "user://privchat-token-c")
