@@ -44,11 +44,12 @@ $GODOT -e --path $DEMO
 $GODOT --headless --path $DEMO -s res://scripts/auto_chat_check.gd
 ```
 
-全部 7 条:
+全部 8 条:
 
 ```bash
 for s in auto_login_check auto_comm_check auto_chat_check auto_game_check \
-         auto_resilience_check auto_robustness_check auto_token_check; do
+         auto_resilience_check auto_robustness_check auto_token_check \
+         auto_navigation_check; do
   echo -n "$s => "
   $GODOT --headless --path $DEMO -s res://scripts/$s.gd 2>&1 \
     | grep -E 'VERIFY_OK|VERIFY_FAILED'
@@ -69,6 +70,7 @@ done
 | `auto_resilience_check` | 断连 → 离线本地读 → 离线入队 → 重连 → 自动重订阅 → 投递 |
 | `auto_robustness_check` | 误用与生命周期:未 start 调用、close 排空、状态抖动、超时不泄漏、二进制 transfer |
 | `auto_token_check` | 真实刷新、single-flight、终态不循环、两个竞态、刷新期本地读 |
+| `auto_navigation_check` | 会话列表 → 聊天页:`channel_id`/`channel_type` 传递、消费后清零、logout 清理 |
 
 ## 版本
 

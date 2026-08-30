@@ -90,8 +90,10 @@ func _load_conversations(title: Label, container: VBoxContainer) -> void:
 		row.text = "%s%s  %s" % [name, badge, preview]
 		row.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		# 带上频道再跳转 —— 否则点了会话列表还要手动输入对方 uid。
+		var ctype := int(c.get("channel_type", 1))
 		row.pressed.connect(func():
 			PrivchatSession.pending_channel_id = cid
+			PrivchatSession.pending_channel_type = ctype
 			get_tree().change_scene_to_file("res://scenes/chat.tscn"))
 		container.add_child(row)
 	if list_resp.channels.is_empty():

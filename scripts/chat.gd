@@ -14,6 +14,7 @@ var list: RichTextLabel
 var status_label: Label
 
 var channel_id: int = -1
+var channel_type: int = 1
 var client: PrivchatClient = null
 var chat: PrivchatChatService = null
 var _rendered_message_ids := {}
@@ -36,8 +37,10 @@ func _ready() -> void:
 	# 从会话列表点进来时直接打开该频道,不必再手输对方 uid。
 	if PrivchatSession.pending_channel_id > 0:
 		var cid: int = PrivchatSession.pending_channel_id
+		var ctype: int = PrivchatSession.pending_channel_type
 		PrivchatSession.pending_channel_id = 0
-		_open_channel(cid)
+		PrivchatSession.pending_channel_type = 0
+		_open_channel(cid, ctype if ctype > 0 else CHANNEL_TYPE_DIRECT)
 
 
 ## 切场景前先 close():排空在途请求并断信号,避免协程状态泄漏。
@@ -130,16 +133,18 @@ func _on_open_pressed() -> void:
 		open_btn.disabled = false
 		status_label.text = "打开会话失败：%s" % resp.error
 		return
-	await _open_channel(resp.channel_id)
+	await _open_channel(resp.channel_id, CHANNEL_TYPE_DIRECT)
 
 
 ## 打开指定频道并渲染历史。手输 uid 与会话列表两条入口共用。
-func _open_channel(cid: int) -> void:
+## channel_type 由调用方给定 —— 会话列表里可能是群聊,不能写死单聊。
+func _open_channel(cid: int, ctype: int) -> void:
 	channel_id = cid
+	channel_type = ctype
 	status_label.text = "打开会话中 ..."
 
 	# local-first 历史:本地为渲染真源,空会话自动补一次最新窗口。
-	var page: Dictionary = await chat.open(channel_id, CHANNEL_TYPE_DIRECT)
+	var page: Dictionary = await chat.open(channel_id, channel_type)
 	open_btn.disabled = false
 	if not page.ok:
 		status_label.text = "拉历史失败：%s" % page.error

@@ -10,8 +10,12 @@ var device_id: String = ""
 var mobile: String = ""
 
 ## 从会话列表点进聊天时携带的目标频道;chat 场景消费后清零。
-## 为 0 表示直接进入聊天页(需手动输入对方 uid)。
+## channel_id 为 0 表示直接进入聊天页(需手动输入对方 uid)。
+##
+## **必须连 channel_type 一起带** —— 会话列表里可能有群聊等其它类型,
+## 只带 id 会让聊天页按写死的类型打开错误的频道。
 var pending_channel_id: int = 0
+var pending_channel_type: int = 0
 
 
 func _ready() -> void:
@@ -65,6 +69,9 @@ func logout() -> void:
 		client.stop()
 		client.queue_free()
 	client = null
+	# 清掉待跳转会话:否则下次登录时可能把上个账号的频道带进去。
+	pending_channel_id = 0
+	pending_channel_type = 0
 	user_id = -1
 	device_id = ""
 	mobile = ""
