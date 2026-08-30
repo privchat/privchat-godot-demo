@@ -23,6 +23,10 @@ window/size/viewport_height=640
 
 enabled=PackedStringArray("res://addons/privchat/plugin.cfg")
 
+[gui]
+
+theme/custom="res://themes/demo_theme.tres"
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"

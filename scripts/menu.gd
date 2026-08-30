@@ -7,10 +7,22 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/login.tscn")
 		return
 
+	var page := MarginContainer.new()
+	page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	page.add_theme_constant_override("margin_left", 24)
+	page.add_theme_constant_override("margin_top", 24)
+	page.add_theme_constant_override("margin_right", 24)
+	page.add_theme_constant_override("margin_bottom", 24)
+	add_child(page)
+
+	var center := CenterContainer.new()
+	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	page.add_child(center)
+
 	var root := VBoxContainer.new()
-	root.set_anchors_preset(Control.PRESET_CENTER)
-	root.custom_minimum_size = Vector2(360, 0)
-	add_child(root)
+	root.custom_minimum_size = Vector2(520, 0)
+	center.add_child(root)
 
 	var title := Label.new()
 	title.text = "PrivChat Godot Demo"

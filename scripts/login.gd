@@ -32,10 +32,22 @@ func _ready() -> void:
 
 
 func _build_ui() -> void:
+	var page := MarginContainer.new()
+	page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	page.add_theme_constant_override("margin_left", 24)
+	page.add_theme_constant_override("margin_top", 24)
+	page.add_theme_constant_override("margin_right", 24)
+	page.add_theme_constant_override("margin_bottom", 24)
+	add_child(page)
+
+	var center := CenterContainer.new()
+	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	page.add_child(center)
+
 	var root := VBoxContainer.new()
-	root.set_anchors_preset(Control.PRESET_CENTER)
-	root.custom_minimum_size = Vector2(420, 0)
-	add_child(root)
+	root.custom_minimum_size = Vector2(600, 0)
+	center.add_child(root)
 
 	var title := Label.new()
 	title.text = "PrivChat Godot Demo — 登录"
@@ -52,6 +64,7 @@ func _build_ui() -> void:
 	mobile_row.add_child(mobile_label)
 	mobile_edit = LineEdit.new()
 	mobile_edit.placeholder_text = "E.164 格式，例如 +8613800000001"
+	mobile_edit.custom_minimum_size.x = 300
 	mobile_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	mobile_row.add_child(mobile_edit)
 	send_code_btn = Button.new()
@@ -68,7 +81,8 @@ func _build_ui() -> void:
 	code_label.custom_minimum_size.x = 80
 	code_row.add_child(code_label)
 	code_edit = LineEdit.new()
-	code_edit.placeholder_text = "dev 环境固定验证码见 e2e.md"
+	code_edit.placeholder_text = "输入开发环境生成的验证码"
+	code_edit.custom_minimum_size.x = 300
 	code_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	code_row.add_child(code_edit)
 	login_btn = Button.new()
@@ -79,7 +93,7 @@ func _build_ui() -> void:
 	root.add_child(_spacer())
 
 	status_label = RichTextLabel.new()
-	status_label.custom_minimum_size = Vector2(420, 240)
+	status_label.custom_minimum_size = Vector2(600, 200)
 	status_label.bbcode_enabled = true
 	status_label.scroll_following = true
 	root.add_child(status_label)
