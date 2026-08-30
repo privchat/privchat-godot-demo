@@ -9,6 +9,10 @@ var user_id: int = -1
 var device_id: String = ""
 var mobile: String = ""
 
+## 从会话列表点进聊天时携带的目标频道;chat 场景消费后清零。
+## 为 0 表示直接进入聊天页(需手动输入对方 uid)。
+var pending_channel_id: int = 0
+
 
 func _ready() -> void:
 	_apply_display_scale()
