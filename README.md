@@ -79,6 +79,19 @@ done
 | godot-cpp | 分支 4.5 @ `60b5a41`(上游 4.x 最新,**没有** 4.6/4.7) |
 | addon `compatibility_minimum` | 4.3(刻意保留,让 4.3/4.4 项目也能用该 addon) |
 
+## HiDPI
+
+Godot 把 `window/size/viewport_*` 当**物理像素**开窗:在 2x 屏上 960 只有
+480 逻辑点,窗口小一半、内容跟着小。工程用两处配合解决:
+
+| 位置 | 作用 |
+|---|---|
+| `project.godot` 的 `stretch/mode="canvas_items"` | 把 960x640 设计视口拉伸到实际窗口,内容随之放大 |
+| `privchat_session.gd` 的 `_apply_display_scale()` | 启动时按 `DisplayServer.screen_get_scale()` 放大**窗口**并重新居中 |
+
+**只放大窗口,不要再设 `content_scale_factor`** —— 它会与 stretch 叠乘成
+4 倍并把内容裁出窗口。写死 2 倍同样不行,非 Retina 屏上会把窗口撑爆。
+
 ## 已知限制
 
 - **图形界面仅经自动走查**,手感与交互反馈仍需人工确认一次;

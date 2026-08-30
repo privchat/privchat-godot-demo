@@ -10,6 +10,32 @@ var device_id: String = ""
 var mobile: String = ""
 
 
+func _ready() -> void:
+	_apply_display_scale()
+
+
+## HiDPI 自适应。
+##
+## Godot 把 `window/size/viewport_*` 当**物理像素**开窗:2x 屏上 960 只有
+## 480 逻辑点,窗口小一半、内容跟着小。静态配置解决不了 —— 写死 2 倍会在
+## 非 Retina 上把窗口撑爆。
+##
+## 因此运行时按屏幕缩放放大**窗口**即可 —— 内容的放大由
+## `stretch/mode="canvas_items"` 负责(它把 960x640 设计视口拉伸到实际窗口)。
+## **不要**再设 content_scale_factor,那会与 stretch 叠乘成 4 倍并裁剪内容。
+func _apply_display_scale() -> void:
+	var win := get_window()
+	if win == null:
+		return
+	var scale := DisplayServer.screen_get_scale(DisplayServer.window_get_current_screen())
+	if scale <= 1.0:
+		return
+	win.size = Vector2i(int(win.size.x * scale), int(win.size.y * scale))
+	# 放大后重新居中,否则窗口会偏出屏幕右下。
+	var screen := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
+	win.position = screen.position + (screen.size - win.size) / 2
+
+
 func begin(c: PrivchatClient, uid: int, did: String, mob: String) -> void:
 	client = c
 	user_id = uid

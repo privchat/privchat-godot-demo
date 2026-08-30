@@ -18,6 +18,12 @@ PrivchatSession="*res://scripts/privchat_session.gd"
 
 window/size/viewport_width=960
 window/size/viewport_height=640
+; HiDPI:允许按显示器缩放开窗,否则 Retina 上按物理像素 1:1 渲染,
+; 16px 字体只有 8 逻辑点大小,看起来小一半。
+; 内容缩放:以上面的视口尺寸为设计基准等比放大,
+; 窗口拉伸或换高分屏时 UI 跟着变大,而不是固定物理像素。
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [editor_plugins]
 
