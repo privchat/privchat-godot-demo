@@ -19,31 +19,34 @@ addon 的每次改动都靠这里的 headless e2e 验证。
 登录用 `+8613800000001` / `+8613800000002`,验证码由脚本从 redis 读取
 (开发环境无短信通道)。
 
-### 当前阻塞:9001 上的 server 需要重启一次
+### SPKI pin(必需)
 
-privchat-sdk 已落地 `feat(transport): require a pinned server identity`:
+privchat-sdk 落地 `feat(transport): require a pinned server identity` 之后,
 没有 SPKI pin 就拒绝建立 tcp:// / quic:// 连接,且 **tcp:// 是 TLS-only,
-不会退回明文**。
+不会退回明文**。网关地址、service API、pin 三个值必须同步变化,统一收在
+`scripts/demo_env.gd`,所有入口经 `DemoEnv.make_client()` 取用。
 
-demo 侧已配好 pin(见 `scripts/demo_env.gd`),但 9001 端口上的
-privchat-server 进程是那次改动**之前**启动的,只会明文:
-
-```
-TLS handshake failed (no plaintext fallback): tls handshake eof
-```
-
-需要用当前二进制重启一次(仓库 `config.toml` 已含 `[gateway.tls]` 与
-`certs/`),重启后 `demo_env.gd` 里的 pin 即为对应值。**这是共享服务,
-重启会同时影响其他还没配 pin 的客户端**,所以 demo 侧没有擅自处理。
-
-改指另一个已开 TLS 的实例是行不通的:token 由 privchat-application(:8080)
-经 9001 签发,换实例后 `authenticate` 直接返回 `10001 Token 验证失败`。
-
-服务端换证书后,不必改代码:
+服务端换证书后不必改代码:
 
 ```bash
 PRIVCHAT_SPKI_PIN=<新 pin> $GODOT --headless --path $DEMO -s res://scripts/auto_login_check.gd
 ```
+
+新 pin 的取法:
+
+```bash
+openssl x509 -in privchat-server/certs/server.crt -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary | openssl base64
+```
+
+> 排错提示:`tls handshake eof` 表示对端在讲明文 —— 多半是 server 进程
+> 早于 TLS 支持启动,重启一次即可,不是 pin 配错。pin 不匹配报的是证书
+> 校验失败,两者症状不同。
+>
+> 也不要试图改指另一个已开 TLS 的 server 实例:token 由
+> privchat-application(:8080)经 9001 签发,换实例后 `authenticate`
+> 直接返回 `10001 Token 验证失败`。
 
 ## 运行
 

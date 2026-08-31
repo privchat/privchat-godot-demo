@@ -8,12 +8,11 @@ extends RefCounted
 
 ## IM 网关:共享开发实例,privchat-application(:8080)的鉴权链绑在它上面。
 ##
-## 已知阻塞:该端口上的 privchat-server 进程是 TLS 支持落地**之前**启动的,
-## 只会明文,当前 SDK 与它握手会拿到 `tls handshake eof`。它需要用现在的
-## 二进制重启一次才能提供 TLS —— 那是共享服务,不该由 demo 侧擅自处理。
-##
 ## 别想着改指另一个带 TLS 的实例:token 由 8080 经 9001 签发,换实例后
 ## authenticate 会直接 `10001 Token 验证失败`,两者的签名密钥不通用。
+##
+## 连不上且报 `tls handshake eof`,说明这个端口上的 server 进程早于 TLS
+## 支持启动、还在讲明文,重启它即可,不是这里的 pin 配错了。
 const DEFAULT_GATEWAY_HOST := "127.0.0.1"
 const DEFAULT_GATEWAY_PORT := 9001
 ## service admin API,须与网关同实例(房间创建、签票、广播都走它)。
