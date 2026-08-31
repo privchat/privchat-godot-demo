@@ -12,6 +12,8 @@
 #   [7] 刷新期间 local-first 读仍可用(不做全局阻塞)
 extends SceneTree
 
+const DemoEnv := preload("res://scripts/demo_env.gd")
+
 const MOBILE := "+8613800000001"
 
 var failures: Array = []
@@ -160,7 +162,7 @@ func _run() -> void:
 
 
 func _login(mobile: String, data_dir: String):
-	var client := PrivchatClient.new()
+	var client := DemoEnv.make_client()
 	client.data_dir = data_dir
 	root.add_child(client)
 	var send_resp: Dictionary = await client.send_sms_code(mobile)

@@ -11,9 +11,12 @@
 #   [5] 重连后服务端广播:A 的 room_message 信号可达(重订阅真实生效)
 extends SceneTree
 
+const DemoEnv := preload("res://scripts/demo_env.gd")
+
 const MOBILE_A := "+8613800000001"
 const MOBILE_B := "+8613800000002"
-const SERVICE_API := "http://127.0.0.1:9090"
+# 与网关同实例,统一由 DemoEnv 决定,避免两处各改一半。
+var SERVICE_API := DemoEnv.service_api()
 const SERVICE_KEY := "your_service_master_key_here"
 const DIRECT_CHANNEL_TYPE := 1
 
@@ -186,7 +189,7 @@ func _run() -> void:
 
 
 func _login(mobile: String, data_dir: String):
-	var client := PrivchatClient.new()
+	var client := DemoEnv.make_client()
 	client.data_dir = data_dir
 	root.add_child(client)
 	var send_resp: Dictionary = await client.send_sms_code(mobile)

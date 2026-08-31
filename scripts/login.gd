@@ -2,6 +2,8 @@
 # 流程：手机号 → 发送短信验证码 → 输入验证码 → 登录（sms-login → authenticate → connect）
 extends Control
 
+const DemoEnv := preload("res://scripts/demo_env.gd")
+
 var mobile_edit: LineEdit
 var code_edit: LineEdit
 var send_code_btn: Button
@@ -17,7 +19,7 @@ var _prelogin_client: PrivchatClient = null
 
 func _client_for_auth() -> PrivchatClient:
 	if _prelogin_client == null:
-		_prelogin_client = PrivchatClient.new()
+		_prelogin_client = DemoEnv.make_client()
 		add_child(_prelogin_client)
 	return _prelogin_client
 

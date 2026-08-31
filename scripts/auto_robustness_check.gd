@@ -11,6 +11,8 @@
 #   [6] 超时后迟到的结果不得在 facade 内泄漏累积
 extends SceneTree
 
+const DemoEnv := preload("res://scripts/demo_env.gd")
+
 const MOBILE_A := "+8613800000001"
 const MOBILE_B := "+8613800000002"
 
@@ -48,7 +50,7 @@ func _run() -> void:
 	await process_frame
 
 	print("== [1/6] 未 start() 就调用 ==")
-	var raw := PrivchatClient.new()
+	var raw := DemoEnv.make_client()
 	root.add_child(raw)
 	var r1: Dictionary = await raw.connect_im(1000)
 	_check(not r1.ok and not str(r1.error).is_empty(), "connect_im before start returns error")
@@ -149,7 +151,7 @@ func _run() -> void:
 
 
 func _login(mobile: String, data_dir: String):
-	var client := PrivchatClient.new()
+	var client := DemoEnv.make_client()
 	client.data_dir = data_dir
 	root.add_child(client)
 	var send_resp: Dictionary = await client.send_sms_code(mobile)

@@ -5,6 +5,8 @@
 #       本脚本直接通过 redis-cli 读取，无需真实短信。
 extends SceneTree
 
+const DemoEnv := preload("res://scripts/demo_env.gd")
+
 # 服务端要求 E.164 格式（MemberAuthLogic 不自动 prepend 区号）。
 const MOBILE := "+8613800000001"
 const RAW_MOBILE := "13800000001"
@@ -19,7 +21,7 @@ func _run() -> void:
 	await process_frame
 
 	print("== [1/5] 创建 PrivchatClient ==")
-	var client := PrivchatClient.new()
+	var client := DemoEnv.make_client()
 	root.add_child(client)
 
 	print("== [2/5] send_sms_code ==")

@@ -11,6 +11,8 @@
 # 验证的是同一份 privchat_session.gd 逻辑。
 extends SceneTree
 
+const DemoEnv := preload("res://scripts/demo_env.gd")
+
 const SessionScript := preload("res://scripts/privchat_session.gd")
 
 const MOBILE_A := "+8613800000001"
@@ -120,7 +122,7 @@ func _run() -> void:
 
 
 func _login(mobile: String, data_dir: String):
-	var client := PrivchatClient.new()
+	var client := DemoEnv.make_client()
 	client.data_dir = data_dir
 	root.add_child(client)
 	var send_resp: Dictionary = await client.send_sms_code(mobile)

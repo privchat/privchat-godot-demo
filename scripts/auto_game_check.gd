@@ -12,8 +12,11 @@
 #   [5] leave 后再广播:不应再收到 game_event(频道过滤护栏)
 extends SceneTree
 
+const DemoEnv := preload("res://scripts/demo_env.gd")
+
 const MOBILE_A := "+8613800000001"
-const SERVICE_API := "http://127.0.0.1:9090"
+# 与网关同实例,统一由 DemoEnv 决定,避免两处各改一半。
+var SERVICE_API := DemoEnv.service_api()
 const SERVICE_KEY := "your_service_master_key_here"
 
 var game_events: Array = []
@@ -86,8 +89,6 @@ func _run() -> void:
 	# 前面几跳(wire → TransferReply → C ABI JSON/out_code)有 Rust 单测,
 	# 这一跳只有跑通真实链路才能证明 —— 它经过 native 的 JSON 解析与
 	# _parse_transfer,任何一处把非零码折叠成通用失败都会在此暴露。
-	# 21901 GameUnknownRoute 由 module-game 的 GameTransferHandler 返回;
-	# 模块未挂载时上面的心跳也不会通,故跳过而不是误判为失败。
 	# 两条路径都能取到一个**非零业务码**:
 	#   module-game 已挂载  → 未知路由,GameTransferHandler 返 21901
 	#   module-game 未挂载  → 频道未绑定,application dispatcher 返 21501
@@ -149,7 +150,7 @@ func _run() -> void:
 
 
 func _login(mobile: String, data_dir: String):
-	var client := PrivchatClient.new()
+	var client := DemoEnv.make_client()
 	client.data_dir = data_dir
 	root.add_child(client)
 	var send_resp: Dictionary = await client.send_sms_code(mobile)
