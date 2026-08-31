@@ -82,6 +82,25 @@ func _run() -> void:
 		# transfer 链路本身(发出→回包)仍被验证,只是业务侧无 handler。
 		print("WARN: heartbeat 未通(%s)— module-game 可能未挂载,继续广播回环验证" % str(hb.error))
 
+	# 业务错误码的最后一跳:application 返回的整数必须原样到达 GDScript。
+	# 前面几跳(wire → TransferReply → C ABI JSON/out_code)有 Rust 单测,
+	# 这一跳只有跑通真实链路才能证明 —— 它经过 native 的 JSON 解析与
+	# _parse_transfer,任何一处把非零码折叠成通用失败都会在此暴露。
+	# 21901 GameUnknownRoute 由 module-game 的 GameTransferHandler 返回;
+	# 模块未挂载时上面的心跳也不会通,故跳过而不是误判为失败。
+	# 两条路径都能取到一个**非零业务码**:
+	#   module-game 已挂载  → 未知路由,GameTransferHandler 返 21901
+	#   module-game 未挂载  → 频道未绑定,application dispatcher 返 21501
+	# 两者都不是核心 IM 码,SDK 与桥接层都不认识它们的语义。
+	var probe: Dictionary = await game.send_command("game/room/no-such-route", {})
+	var want := 21901 if hb.ok else 21501
+	if probe.code == want:
+		print("  ok: business code %d survived application -> GDScript" % want)
+	else:
+		_fail("business code passthrough: want %d, got code=%d error=%s"
+				% [want, probe.code, str(probe.error)])
+		return
+
 	print("== [4/5] 广播 x2 -> game_event 信号 + 去重 ==")
 	var stamp := int(Time.get_unix_time_from_system())
 	for i in range(2):
