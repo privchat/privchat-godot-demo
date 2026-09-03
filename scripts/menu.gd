@@ -45,6 +45,11 @@ func _ready() -> void:
 	room_btn.pressed.connect(func(): get_tree().change_scene_to_file("res://scenes/room.tscn"))
 	root.add_child(room_btn)
 
+	var mmo_btn := Button.new()
+	mmo_btn.text = "MMORPG 场景(module-mmorpg)"
+	mmo_btn.pressed.connect(func(): get_tree().change_scene_to_file("res://scenes/mmo.tscn"))
+	root.add_child(mmo_btn)
+
 	root.add_child(_spacer())
 
 	# --- 会话列表(top 优先、时间降序;带未读角标)---

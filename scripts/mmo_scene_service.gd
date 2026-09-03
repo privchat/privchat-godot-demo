@@ -18,9 +18,15 @@ extends Node
 const PROTOCOL_VERSION := 1
 const TOPIC_PUBLIC := "mmorpg.scene.public"
 const ROUTE_HEARTBEAT := "mmorpg/scene/heartbeat"
+const ROUTE_MOVE := "mmorpg/scene/move"
+
+## 定点坐标:1 = 1/1000 世界单位,原点左上,+x 右 +y 下;三端一律向零取整。
+const FIXED := 1000
 
 ## 场景公共事件(已去重)。event 是 "scene.role_entered" / "scene.role_left"。
 signal presence(event: String, role_id: int, role_name: String, seq: int, raw: Dictionary)
+## 一段权威移动开始(MovementStarted 的 JSON 镜像)。客户端沿同一路径本地插值。
+signal movement_started(entity_id: int, movement: Dictionary, seq: int)
 ## 重连后自动重订阅的结果。
 signal rejoined(ok: bool, error: String)
 
@@ -35,6 +41,9 @@ var channel_id: int = 0
 var scene_session_id: int = 0
 var session_epoch: int = 0
 var last_public_seq: int = 0
+
+## 本角色已发出的最大 movement_seq;Stop 也占用新值(spec §4.1.1)。
+var movement_seq: int = 0
 
 var _next_request: int = 1
 
@@ -85,6 +94,7 @@ func enter(p_scene_ref: String, device_id: String) -> Dictionary:
 	channel_id = int(resp.data.channel_id)
 	scene_session_id = int(resp.data.scene_session_id)
 	session_epoch = int(resp.data.session_epoch)
+	movement_seq = 0   # 序号作用域是 scene_session(spec §9.2)
 	if sub.is_subscribed() and sub.channel_id != channel_id:
 		await sub.unsubscribe()
 	if not sub.is_subscribed():
@@ -110,6 +120,72 @@ func public_snapshot() -> Dictionary:
 ## 断线重连的恢复入口:拿回 scene_session_id 与序号基线。
 func private_snapshot() -> Dictionary:
 	return await _app("GET", "/mmo/scene/%s/roles/%d/private-snapshot" % [scene_ref, role_id])
+
+
+# --- 移动 -------------------------------------------------------------------
+
+## 点击寻路:发意图,不发坐标帧。返回 { ok, code, data: MoveIntentAck, error }。
+## 拒绝(21603 越界 / 21605 序号迟到 / 21606 幂等冲突)走外层 code,data 为空。
+func move_to(x: int, y: int) -> Dictionary:
+	movement_seq += 1
+	return await transfer(ROUTE_MOVE, {
+		"protocol_version": PROTOCOL_VERSION,
+		"scene_session_id": scene_session_id,
+		"movement_seq": movement_seq,
+		"command": { "move_to": { "target_position": { "x": x, "y": y } } },
+		"client_time_ms": int(Time.get_unix_time_from_system() * 1000.0),
+	})
+
+
+## 就地停下。同样占用新的 movement_seq。
+func stop() -> Dictionary:
+	movement_seq += 1
+	return await transfer(ROUTE_MOVE, {
+		"protocol_version": PROTOCOL_VERSION,
+		"scene_session_id": scene_session_id,
+		"movement_seq": movement_seq,
+		"command": { "stop": {} },
+		"client_time_ms": int(Time.get_unix_time_from_system() * 1000.0),
+	})
+
+
+## 按服务端的路径参数推算 t 时刻(服务端时钟,Unix ms)的位置。与服务端同一
+## 套整数算法、向零取整,所以两端算出的是同一个点。
+static func position_on_path(movement: Dictionary, server_now_ms: int) -> Vector2i:
+	var start: Dictionary = movement.get("authoritative_start_position", {})
+	var sx := int(start.get("x", 0))
+	var sy := int(start.get("y", 0))
+	var points: Array = movement.get("path_points", [])
+	var speed := int(movement.get("speed", 0))
+	if points.is_empty() or speed <= 0:
+		return Vector2i(sx, sy)
+	var tx := int(points[0].get("x", sx))
+	var ty := int(points[0].get("y", sy))
+	var dx := tx - sx
+	var dy := ty - sy
+	var total := _isqrt(dx * dx + dy * dy)
+	if total == 0:
+		return Vector2i(tx, ty)
+	var elapsed: int = maxi(server_now_ms - int(movement.get("start_time_ms", 0)), 0)
+	@warning_ignore("integer_division")
+	var travelled: int = speed * elapsed / 1000
+	if travelled >= total:
+		return Vector2i(tx, ty)
+	@warning_ignore("integer_division")
+	return Vector2i(sx + dx * travelled / total, sy + dy * travelled / total)
+
+
+static func _isqrt(n: int) -> int:
+	if n <= 0:
+		return 0
+	var x := n
+	@warning_ignore("integer_division")
+	var y := (x + 1) / 2
+	while y < x:
+		x = y
+		@warning_ignore("integer_division")
+		y = (x + n / x) / 2
+	return x
 
 
 # --- 心跳 -------------------------------------------------------------------
@@ -166,7 +242,12 @@ func _on_message(payload_text: String, _bytes: PackedByteArray, _topic: String,
 	# seq 回退 = 服务端序列重置(重启/多实例),客户端约定丢弃增量拉 snapshot;
 	# 这里只记录基线,由业务决定何时拉。
 	last_public_seq = seq
-	presence.emit(str(parsed.get("event", "")), int(parsed.get("role_id", 0)),
+	var event := str(parsed.get("event", ""))
+	if event == "scene.movement_started":
+		var m: Dictionary = parsed.get("movement_started", {})
+		movement_started.emit(int(m.get("entity_id", 0)), m, seq)
+		return
+	presence.emit(event, int(parsed.get("role_id", 0)),
 			str(parsed.get("role_name", "")), seq, parsed)
 
 
