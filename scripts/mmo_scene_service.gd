@@ -11,6 +11,13 @@
 #   Transfer  mmorpg/scene/heartbeat  { protocol_version, scene_session_id, request_id, client_time_ms }
 #   Room publish  topic mmorpg.scene.public  { event: scene.role_entered | scene.role_left, role_id, seq, ... }
 #
+# 战斗(MMO_BATTLE_PROTOCOL_SPEC §15,JSON 镜像 battle_*.fbs):
+#   HTTP   POST /app/mmo/scene/{scene_ref}/roles/{role_id}/battles {npc_id, device_id} → transition/battle/channel/ticket
+#   HTTP   GET  /app/mmo/battle/{battle_id}/roles/{role_id}/private-snapshot            (open_slots 在这里)
+#   Transfer  mmorpg/battle/command  BattleCommandEnvelope → BattleCommandAck
+#   Transfer  mmorpg/battle/instant  { op: SURRENDER, state_version }
+#   Room publish  topic mmorpg.battle.public  BattleEventBatchEnvelope
+#
 # 服务端的鉴权依据是 scene_session_id:客户端不自报角色与场景。
 class_name DemoMmoSceneService
 extends Node
@@ -20,6 +27,9 @@ const TOPIC_PUBLIC := "mmorpg.scene.public"
 const ROUTE_HEARTBEAT := "mmorpg/scene/heartbeat"
 const ROUTE_MOVE := "mmorpg/scene/move"
 const ROUTE_INTERACT := "mmorpg/scene/interact"
+const ROUTE_BATTLE_COMMAND := "mmorpg/battle/command"
+const ROUTE_BATTLE_INSTANT := "mmorpg/battle/instant"
+const TOPIC_BATTLE_PUBLIC := "mmorpg.battle.public"
 
 ## 定点坐标:1 = 1/1000 世界单位,原点左上,+x 右 +y 下;三端一律向零取整。
 const FIXED := 1000
@@ -30,6 +40,9 @@ signal presence(event: String, role_id: int, role_name: String, seq: int, raw: D
 signal movement_started(entity_id: int, movement: Dictionary, seq: int)
 ## 重连后自动重订阅的结果。
 signal rejoined(ok: bool, error: String)
+## 战斗 PUBLIC 事件(BattleEventBatchEnvelope 里的一条 BattleEvent;已按 stream_seq 去重)。
+## payload 是单键对象:phase_changed / initiative_resolved / damage_dealt / actor_died / battle_settled。
+signal battle_event(battle_id: int, event: Dictionary, stream_seq: int)
 
 var client: PrivchatClient = null
 var sub: PrivchatSubscription = null
@@ -48,6 +61,15 @@ var movement_seq: int = 0
 
 var _next_request: int = 1
 
+# --- 战斗状态(§7.2 过渡期双订阅:场景 Room 不退,战斗 Room 另开一条订阅)---
+var battle_sub: PrivchatSubscription = null
+var battle_id: int = 0
+var battle_channel_id: int = 0
+var transition_id: int = 0
+var battle_public_seq: int = 0
+## (battle_id, actor_id) 内递增的 action_seq;被拒的提交不占用。
+var action_seq: int = 0
+
 
 func setup(p_client: PrivchatClient, p_access_token: String) -> void:
 	client = p_client
@@ -60,6 +82,7 @@ func setup(p_client: PrivchatClient, p_access_token: String) -> void:
 
 
 func close() -> void:
+	await leave_battle()
 	if sub != null:
 		await sub.close()
 		sub = null
@@ -206,6 +229,128 @@ func fetch_map(map_id: int) -> Dictionary:
 	return await _app("GET", "/mmo/maps/%d" % map_id)
 
 
+# --- 战斗 -------------------------------------------------------------------
+
+## 从场景发起 PvE 战斗(NPC 的 interact options 含 "battle")。成功后订阅战斗 Room;
+## 场景 Room 保持订阅(§7.2)。返回 { ok, code, data: BattleEntryResponse, error }。
+func start_battle(npc_id: int, device_id: String) -> Dictionary:
+	var resp: Dictionary = await _app("POST", "/mmo/scene/%s/roles/%d/battles" % [scene_ref, role_id],
+			{ "npc_id": npc_id, "device_id": device_id })
+	if not resp.ok:
+		return resp
+	return await _join_battle(resp)
+
+
+## 断线后凭 transition_id 续接(§15.1)。
+func resume_battle(p_transition_id: int) -> Dictionary:
+	var resp: Dictionary = await _app("GET", "/mmo/battles/transitions/%d" % p_transition_id)
+	if not resp.ok:
+		return resp
+	if str(resp.data.status) != "READY":
+		return { "ok": false, "code": -1, "data": resp.data, "error": "transition %s" % str(resp.data.status) }
+	return await _join_battle(resp)
+
+
+func _join_battle(resp: Dictionary) -> Dictionary:
+	transition_id = int(resp.data.transition_id)
+	battle_id = int(resp.data.battle_id)
+	battle_channel_id = int(str(resp.data.channel_id))
+	battle_public_seq = 0
+	action_seq = 0
+	if battle_sub == null:
+		battle_sub = PrivchatSubscription.new()
+		add_child(battle_sub)
+		battle_sub.setup(client)
+		battle_sub.message_received.connect(_on_battle_message)
+	if battle_sub.is_subscribed():
+		await battle_sub.unsubscribe()
+	var joined: Dictionary = await battle_sub.subscribe(battle_channel_id, str(resp.data.ticket))
+	if not joined.ok:
+		return { "ok": false, "data": resp.data, "error": "subscribe battle: %s" % joined.error, "code": -1 }
+	return resp
+
+
+## 退订战斗 Room。退出战斗的正路是:BattleSettled 后**先**重新 enter 场景(epoch+1),再调这个。
+func leave_battle() -> void:
+	if battle_sub != null and battle_sub.is_subscribed():
+		await battle_sub.unsubscribe()
+	battle_id = 0
+	battle_channel_id = 0
+
+
+func in_battle() -> bool:
+	return battle_id != 0 and battle_sub != null and battle_sub.is_subscribed()
+
+
+## 自己视角的战斗快照:open_slots / submitted_commands / private_actor_states 只在这里。
+func battle_private_snapshot() -> Dictionary:
+	return await _app("GET", "/mmo/battle/%d/roles/%d/private-snapshot" % [battle_id, role_id])
+
+
+func battle_public_snapshot() -> Dictionary:
+	return await _app("GET", "/mmo/battle/%d/snapshot" % battle_id)
+
+
+## 提交一条回合指令。slot 来自 private snapshot 的 open_slots;payload 是 CommandPayload 的单键对象,
+## 如 { "attack": { "selected_target_id": 9 } } / { "defend": {} } / { "escape": {} } / { "wait": {} }。
+## 返回 { ok, code, data: BattleCommandAck, error };拒绝码 21401-21416 原样透出。
+func submit_command(snapshot: Dictionary, slot: Dictionary, payload: Dictionary) -> Dictionary:
+	action_seq += 1
+	var resp: Dictionary = await _battle_transfer(ROUTE_BATTLE_COMMAND, {
+		"protocol_version": PROTOCOL_VERSION,
+		"battle_id": battle_id,
+		"role_id": role_id,
+		"actor_id": int(slot.actor_id),
+		"command_slot_id": int(slot.command_slot_id),
+		"round": int(snapshot.round),
+		"phase": str(snapshot.phase),
+		"phase_version": int(snapshot.phase_version),
+		"action_seq": action_seq,
+		"payload": payload,
+	})
+	if not resp.ok:
+		action_seq -= 1
+	return resp
+
+
+## 认输(即时权威操作,带 state_version 乐观锁 → 21409)。
+func surrender(state_version: int) -> Dictionary:
+	return await _battle_transfer(ROUTE_BATTLE_INSTANT, {
+		"protocol_version": PROTOCOL_VERSION,
+		"battle_id": battle_id,
+		"role_id": role_id,
+		"state_version": state_version,
+		"op": "SURRENDER",
+	})
+
+
+func _battle_transfer(route: String, payload: Dictionary, timeout_ms: int = 8000) -> Dictionary:
+	if not in_battle():
+		return { "ok": false, "code": -1, "data": {}, "error": "not in a battle" }
+	var body := payload.duplicate()
+	body["request_id"] = "gd-b%d-%d" % [role_id, _next_request]
+	_next_request += 1
+	var resp: Dictionary = await client.transfer(battle_channel_id, route, body, timeout_ms)
+	return _parse_transfer(resp)
+
+
+func _on_battle_message(payload_text: String, _bytes: PackedByteArray, _topic: String,
+		_publisher: String, _sid: int, _ts: int) -> void:
+	var parsed = JSON.parse_string(payload_text)
+	if typeof(parsed) != TYPE_DICTIONARY or str(parsed.get("topic", "")) != TOPIC_BATTLE_PUBLIC:
+		return
+	var bid := int(parsed.get("battle_id", 0))
+	if bid != battle_id:
+		return
+	for e in parsed.get("events", []):
+		var seq := int(e.get("stream_seq", 0))
+		# Room 会回放历史广播;按 stream_seq 去重,漏号则由业务拉 snapshot。
+		if seq <= battle_public_seq:
+			continue
+		battle_public_seq = seq
+		battle_event.emit(bid, e, seq)
+
+
 # --- 心跳 -------------------------------------------------------------------
 
 ## 返回 { ok, code, data: { scene_session_id, server_time_ms, public_scene_seq }, error }。
@@ -272,7 +417,7 @@ func _on_message(payload_text: String, _bytes: PackedByteArray, _topic: String,
 # --- HTTP -------------------------------------------------------------------
 
 ## 应用路由(Bearer 认证)。返回 { ok, code, data, error }:业务错误码原样透出
-## (21600-21610),与 transfer 路径同一套数字。
+## (21400-21416 / 21600-21613),与 transfer 路径同一套数字。
 func _app(method: String, path: String, body = null) -> Dictionary:
 	var req := HTTPRequest.new()
 	add_child(req)

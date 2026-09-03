@@ -2,6 +2,8 @@
 #
 # 梦幻西游式的场景交互:点地图 → 角色沿服务端权威路径走过去;别人的角色按
 # 广播的路径参数本地插值。客户端不发坐标帧,只发意图(§4.1)。
+# 点可战 NPC → 发起回合制战斗(MMO_BATTLE_PROTOCOL_SPEC §15):右侧出战斗面板,
+# 指令按钮来自 private snapshot 的 open_slots;结算后重新 enter 场景再退订战斗 Room。
 extends Control
 
 const MmoSceneService := preload("res://scripts/mmo_scene_service.gd")
@@ -14,6 +16,11 @@ var service = null
 var map_view: Control
 var status_label: Label
 var log_view: RichTextLabel
+var battle_panel: VBoxContainer
+var battle_info: Label
+var battle_buttons: HBoxContainer
+## 最近一次 private snapshot(BattleSnapshotResponse);null = 不在战斗。
+var battle_snapshot = null
 
 ## role_id → { name, movement: Dictionary(MovementStarted 镜像) 或 position: Vector2i }
 var roles: Dictionary = {}
@@ -66,11 +73,25 @@ func _build_ui() -> void:
 	map_view.owner_scene = self
 	body.add_child(map_view)
 
+	var side := VBoxContainer.new()
+	side.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	side.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(side)
+
+	battle_panel = VBoxContainer.new()
+	battle_panel.visible = false
+	side.add_child(battle_panel)
+	battle_info = Label.new()
+	battle_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	battle_panel.add_child(battle_info)
+	battle_buttons = HBoxContainer.new()
+	battle_panel.add_child(battle_buttons)
+
 	log_view = RichTextLabel.new()
 	log_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	log_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	log_view.scroll_following = true
-	body.add_child(log_view)
+	side.add_child(log_view)
 
 
 func _start() -> void:
@@ -79,6 +100,7 @@ func _start() -> void:
 	service.setup(PrivchatSession.client, PrivchatSession.client.access_token)
 	service.presence.connect(_on_presence)
 	service.movement_started.connect(_on_movement_started)
+	service.battle_event.connect(_on_battle_event)
 	service.rejoined.connect(func(ok, err): _log("重连后重订阅:%s %s" % ["ok" if ok else "失败", err]))
 
 	var role: Dictionary = await service.ensure_role("gd-%d" % PrivchatSession.user_id)
@@ -151,6 +173,8 @@ func request_move(px: Vector2) -> void:
 			var r: Dictionary = await service.interact(int(nid))
 			if r.ok:
 				_log("[color=yellow]%s:%s[/color]" % [r.data.name, r.data.dialog])
+				if Array(r.data.get("options", [])).has("battle"):
+					await _start_battle(int(nid), str(n.name))
 			elif r.code == 21612:
 				_log("离 %s 太远,先走过去" % str(n.name))
 			else:
@@ -176,6 +200,124 @@ func _on_movement_started(entity_id: int, movement: Dictionary, _seq: int) -> vo
 	entry.erase("position")
 	roles[entity_id] = entry
 	map_view.queue_redraw()
+
+
+# --- 战斗 -------------------------------------------------------------------
+
+func _start_battle(npc_id: int, npc_name: String) -> void:
+	var entry: Dictionary = await service.start_battle(npc_id, PrivchatSession.device_id)
+	if not entry.ok:
+		_log("[color=red]发起战斗失败(%d):%s[/color]" % [entry.code, entry.error])
+		return
+	_log("[color=orange]与 %s 开战!battle=%d[/color]" % [npc_name, service.battle_id])
+	battle_panel.visible = true
+	await _refresh_battle()
+
+
+## 指令按钮永远来自服务端签发的 slot:没有 slot 就没有按钮(§4.1 行动机会)。
+func _refresh_battle() -> void:
+	if service == null or not service.in_battle():
+		return
+	var snap: Dictionary = await service.battle_private_snapshot()
+	if not snap.ok:
+		if snap.code == 21400:
+			await _exit_battle()
+		else:
+			_log("[color=red]战斗快照失败(%d):%s[/color]" % [snap.code, snap.error])
+		return
+	battle_snapshot = snap.data
+	var lines: PackedStringArray = []
+	lines.append("回合 %d  阶段 %s" % [int(snap.data.round), str(snap.data.phase)])
+	for a in snap.data.actors:
+		var nm: String = str(snap.data.actor_names.get(str(int(a.actor_id)), "#%d" % int(a.actor_id)))
+		var hp := "%d%%" % int(a.hp_percent)
+		for ps in snap.data.private_actor_states:
+			if int(ps.actor_id) == int(a.actor_id):
+				hp = "%d/%d" % [int(ps.exact_hp), int(ps.max_hp)]
+		lines.append("%s %s  HP %s%s" % ["我方" if int(a.side) == 0 else "敌方", nm, hp, "" if bool(a.alive) else "(倒下)"])
+	battle_info.text = "\n".join(lines)
+	for c in battle_buttons.get_children():
+		c.queue_free()
+	if str(snap.data.phase) == "SETTLE":
+		var w := int(snap.data.winner_side)
+		lines.append("结算:%s" % ("胜利" if w == 0 else ("战败" if w == 1 else "无胜负")))
+		battle_info.text = "\n".join(lines)
+		var back := Button.new()
+		back.text = "回到场景"
+		back.pressed.connect(func(): _exit_battle())
+		battle_buttons.add_child(back)
+		return
+	for slot in snap.data.open_slots:
+		if int(slot.accepted_action_seq) > 0:
+			continue
+		for kind in slot.allowed_commands:
+			var b := Button.new()
+			b.text = { "ATTACK": "攻击", "DEFEND": "防御", "ESCAPE": "逃跑", "WAIT": "等待" }.get(str(kind), str(kind))
+			b.pressed.connect(_on_command.bind(slot, str(kind)))
+			battle_buttons.add_child(b)
+	var give_up := Button.new()
+	give_up.text = "认输"
+	give_up.pressed.connect(func():
+		var r: Dictionary = await service.surrender(int(battle_snapshot.state_version))
+		if not r.ok:
+			_log("[color=red]认输失败(%d):%s[/color]" % [r.code, r.error])
+		await _refresh_battle())
+	battle_buttons.add_child(give_up)
+
+
+func _on_command(slot: Dictionary, kind: String) -> void:
+	var payload := {}
+	match kind:
+		"ATTACK":
+			var targets: Array = []
+			for ps in battle_snapshot.private_actor_states:
+				if int(ps.actor_id) == int(slot.actor_id):
+					targets = ps.selectable_target_ids
+			if targets.is_empty():
+				return
+			payload = { "attack": { "selected_target_id": int(targets[0]) } }
+		"DEFEND": payload = { "defend": {} }
+		"ESCAPE": payload = { "escape": {} }
+		_: payload = { "wait": {} }
+	var ack: Dictionary = await service.submit_command(battle_snapshot, slot, payload)
+	if not ack.ok:
+		_log("[color=red]指令被拒(%d):%s[/color]" % [ack.code, ack.error])
+	else:
+		_log("指令受理 seq=%d" % int(ack.data.accepted_action_seq))
+	await _refresh_battle()
+
+
+func _on_battle_event(_bid: int, event: Dictionary, _seq: int) -> void:
+	var payload: Dictionary = event.get("payload", {})
+	var names: Dictionary = battle_snapshot.actor_names if battle_snapshot != null else {}
+	for key in payload.keys():
+		var body: Dictionary = payload[key]
+		match key:
+			"damage_dealt":
+				var src: String = str(names.get(str(int(body.source_actor_id)), body.source_actor_id))
+				var dst: String = str(names.get(str(int(body.resolved_target_ids[0])), body.resolved_target_ids[0]))
+				_log("%s 对 %s 造成 %d 伤害%s" % [src, dst, int(body.amounts[0]), "(目标已倒,改选)" if str(body.retarget_reason) == "TARGET_DEAD" else ""])
+			"actor_died":
+				_log("%s 倒下了" % str(names.get(str(int(body.actor_id)), body.actor_id)))
+			"phase_changed":
+				if str(body.to) == "COMMAND":
+					_log("—— 第 %d 回合 ——%s" % [int(body.round), "(超时按默认动作)" if bool(event.get("default_action_applied", false)) else ""])
+					await _refresh_battle()
+			"battle_settled":
+				_log("[color=orange]战斗结束:winner_side=%d[/color]" % int(body.winner_side))
+				await _refresh_battle()
+
+
+## 退出战斗的正路(§7.2 / §15.2):先重新 enter 场景拿新 ticket,再退订战斗 Room。
+func _exit_battle() -> void:
+	battle_panel.visible = false
+	battle_snapshot = null
+	var back: Dictionary = await service.enter(SCENE_REF, PrivchatSession.device_id)
+	if not back.ok:
+		_log("[color=red]回到场景失败(%d):%s[/color]" % [back.code, back.error])
+	await service.leave_battle()
+	await _refresh_snapshot()
+	_log("回到场景 epoch=%d" % service.session_epoch)
 
 
 func _on_presence(event: String, role_id: int, role_name: String, _seq: int, _raw: Dictionary) -> void:

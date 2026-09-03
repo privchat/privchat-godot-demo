@@ -13,7 +13,11 @@
 #   [7] A move_to → ACK;B 收到 scene.movement_started(A) 的权威路径;越界 21603;
 #       目标在障碍另一侧 → 服务端寻路绕行(path_points ≥ 2);NPC 交互:太远 21612 → 走近后 ok;
 #       同 request_id 重试 → replayed;旧序号 → 21605;stop 占用序号;snapshot 带位置
-#   [8] B leave → A 收到 scene.role_left;public snapshot 只剩 A
+#   [8] A 走到可战 NPC → interact options 含 "battle" → 发起战斗(READY,战斗 Room 订阅);
+#       战斗中 move → 21613;private snapshot 给 open_slots;提交 ATTACK → ACK;旧回合重提 → 21402;
+#       打到结算:public 收到 phase_changed / initiative_resolved / damage_dealt / battle_settled;
+#       重新 enter 场景(epoch+1)→ 退订战斗 Room → 又能移动(MMO_BATTLE_PROTOCOL_SPEC §15.8)
+#   [9] B leave → A 收到 scene.role_left;public snapshot 只剩 A
 extends SceneTree
 
 const DemoEnv := preload("res://scripts/demo_env.gd")
@@ -30,6 +34,7 @@ const ADMIN_PASSWORD := "admin123"
 
 var presence_a: Array = []
 var moves_b: Array = []
+var battle_events: Array = []
 
 
 func _initialize() -> void:
@@ -39,7 +44,7 @@ func _initialize() -> void:
 
 func _watchdog() -> void:
 	var t := Timer.new()
-	t.wait_time = 120.0
+	t.wait_time = 240.0
 	t.one_shot = true
 	t.autostart = true
 	t.timeout.connect(func() -> void: _fail("watchdog timeout"))
@@ -55,7 +60,7 @@ func _run() -> void:
 	await process_frame
 	await process_frame
 
-	print("== [0/8] 后台开场景 %s ==" % SCENE)
+	print("== [0/9] 后台开场景 %s ==" % SCENE)
 	var admin_token := await _admin_login()
 	if admin_token.is_empty():
 		_fail("admin login")
@@ -66,7 +71,7 @@ func _run() -> void:
 		return
 	print("scene open: channel_id=%s status=%s" % [str(opened.data.channel_id), str(opened.data.status)])
 
-	print("== [1/8] 双账号登录 + ensure 角色 ==")
+	print("== [1/9] 双账号登录 + ensure 角色 ==")
 	var a = await _login(MOBILE_A, "user://privchat-mmo-a")
 	if a == null:
 		_fail("login A")
@@ -103,21 +108,21 @@ func _run() -> void:
 		return
 	print("  ok: unopened scene -> 21600")
 
-	print("== [2/8] A enter %s ==" % SCENE)
+	print("== [2/9] A enter %s ==" % SCENE)
 	var ea: Dictionary = await mmo_a.enter(SCENE, a.device_id)
 	if not ea.ok:
 		_fail("enter A: %s" % ea.error)
 		return
 	print("A: channel=%d session=%d epoch=%d" % [mmo_a.channel_id, mmo_a.scene_session_id, mmo_a.session_epoch])
 
-	print("== [3/8] A heartbeat ==")
+	print("== [3/9] A heartbeat ==")
 	var hb: Dictionary = await mmo_a.heartbeat()
 	if not hb.ok or int(hb.data.get("scene_session_id", 0)) != mmo_a.scene_session_id:
 		_fail("heartbeat A: code=%d %s data=%s" % [hb.code, hb.error, JSON.stringify(hb.data)])
 		return
 	print("heartbeat ok: server_time_ms=%d public_scene_seq=%d" % [int(hb.data.server_time_ms), int(hb.data.public_scene_seq)])
 
-	print("== [4/8] B enter 同一场景 → A 收到 role_entered ==")
+	print("== [4/9] B enter 同一场景 → A 收到 role_entered ==")
 	var eb: Dictionary = await mmo_b.enter(SCENE, b.device_id)
 	if not eb.ok:
 		_fail("enter B: %s" % eb.error)
@@ -131,7 +136,7 @@ func _run() -> void:
 		return
 	print("A saw: %s" % JSON.stringify(ev))
 
-	print("== [5/8] 业务错误码原样到达 GDScript ==")
+	print("== [5/9] 业务错误码原样到达 GDScript ==")
 	var stolen: Dictionary = await mmo_a.heartbeat(mmo_b.scene_session_id)
 	if stolen.code != 21607:
 		_fail("someone else's session must be 21607, got code=%d %s" % [stolen.code, stolen.error])
@@ -142,7 +147,7 @@ func _run() -> void:
 		return
 	print("  ok: 21607 / 21610 survived application -> GDScript")
 
-	print("== [6/8] 重连恢复 + 重进使旧 session 失效 ==")
+	print("== [6/9] 重连恢复 + 重进使旧 session 失效 ==")
 	var snap: Dictionary = await mmo_a.private_snapshot()
 	if not snap.ok or int(snap.data.scene_session_id) != mmo_a.scene_session_id:
 		_fail("private snapshot mismatch: %s" % JSON.stringify(snap))
@@ -166,7 +171,7 @@ func _run() -> void:
 		return
 	print("  ok: session %d -> %d (epoch %d -> %d), stale session rejected" % [old_session, mmo_a.scene_session_id, old_epoch, mmo_a.session_epoch])
 
-	print("== [7/8] A move_to → B 收到 movement_started;拒绝码;幂等回放;stop ==")
+	print("== [7/9] A move_to → B 收到 movement_started;拒绝码;幂等回放;stop ==")
 	var target_x := int(DemoMmoSceneService.FIXED * 70)
 	var target_y := int(DemoMmoSceneService.FIXED * 40)
 	# Room 会给迟到的订阅者回放历史广播:B 订阅时已经收到了以前跑出来的旧移动事件。
@@ -276,7 +281,118 @@ func _run() -> void:
 		return
 	print("  ok: detour (%d points) / 21603 in obstacle / 21612 then dialog" % det_pts.size())
 
-	print("== [8/8] B leave → A 收到 role_left;snapshot 只剩 A ==")
+	print("== [8/9] 战斗:走到可战 NPC → 发起 → 提交指令 → 结算 → 回场景 ==")
+	mmo_a.battle_event.connect(func(_bid, e, seq): battle_events.append({ "seq": seq, "event": e }))
+	var monster = null
+	for n in snap3.data.npcs:
+		if str(n.kind) == "monster":
+			monster = n
+	if monster == null:
+		_fail("seed map has no monster npc: %s" % JSON.stringify(snap3.data.npcs))
+		return
+	var walk2: Dictionary = await mmo_a.move_to(int(monster.position.x) - 1500, int(monster.position.y))
+	if not walk2.ok:
+		_fail("walk to monster: code=%d %s" % [walk2.code, walk2.error])
+		return
+	var options: Array = []
+	var walk_deadline := Time.get_ticks_msec() + 60000
+	while Time.get_ticks_msec() < walk_deadline:
+		var probe2: Dictionary = await mmo_a.interact(int(monster.npc_id))
+		if probe2.ok:
+			options = probe2.data.get("options", [])
+			break
+		if probe2.code != 21612:
+			_fail("interact monster: code=%d %s" % [probe2.code, probe2.error])
+			return
+		await _sleep(1.0)
+	if not options.has("battle"):
+		_fail("monster npc must offer 'battle', got %s" % JSON.stringify(options))
+		return
+	var entry: Dictionary = await mmo_a.start_battle(int(monster.npc_id), a.device_id)
+	if not entry.ok or str(entry.data.status) != "READY":
+		_fail("start battle: code=%d %s data=%s" % [entry.code, entry.error, JSON.stringify(entry.data)])
+		return
+	print("battle %d on channel %d (transition %d)" % [mmo_a.battle_id, mmo_a.battle_channel_id, mmo_a.transition_id])
+	var locked: Dictionary = await mmo_a.move_to(1000, 1000)
+	if locked.code != 21613:
+		_fail("moving while in battle must be 21613, got code=%d %s" % [locked.code, locked.error])
+		return
+	mmo_a.movement_seq -= 1
+	var resumed: Dictionary = await mmo_a.resume_battle(mmo_a.transition_id)
+	if not resumed.ok or int(resumed.data.battle_id) != mmo_a.battle_id:
+		_fail("resume via transition: code=%d %s" % [resumed.code, resumed.error])
+		return
+	var bs: Dictionary = await mmo_a.battle_private_snapshot()
+	if not bs.ok or str(bs.data.phase) != "COMMAND" or bs.data.open_slots.size() != 1:
+		_fail("battle private snapshot: code=%d %s data=%s" % [bs.code, bs.error, JSON.stringify(bs.data)])
+		return
+	var slot0: Dictionary = bs.data.open_slots[0]
+	if not slot0.allowed_commands.has("ATTACK") or int(bs.data.private_actor_states[0].exact_hp) <= 0:
+		_fail("slot must allow ATTACK with exact hp: %s" % JSON.stringify(bs.data))
+		return
+	var pub: Dictionary = await mmo_a.battle_public_snapshot()
+	if not pub.ok or pub.data.open_slots.size() != 0 or pub.data.private_actor_states.size() != 0:
+		_fail("public snapshot must not leak slots / exact resources: %s" % JSON.stringify(pub.data))
+		return
+	var first_ack: Dictionary = await mmo_a.submit_command(bs.data, slot0, { "attack": { "selected_target_id": int(bs.data.private_actor_states[0].selectable_target_ids[0]) } })
+	if not first_ack.ok or int(first_ack.data.accepted_action_seq) != 1:
+		_fail("submit attack: code=%d %s data=%s" % [first_ack.code, first_ack.error, JSON.stringify(first_ack.data)])
+		return
+	# 单人单 slot:提交即结算,回合已翻页;拿旧快照再提 → 21402。
+	var stale_round: Dictionary = await mmo_a.submit_command(bs.data, slot0, { "defend": {} })
+	if stale_round.code != 21402:
+		_fail("stale round must be 21402, got code=%d %s" % [stale_round.code, stale_round.error])
+		return
+	var rounds := 1
+	var final_phase := ""
+	while rounds < 30:
+		var cur: Dictionary = await mmo_a.battle_private_snapshot()
+		if not cur.ok:
+			if cur.code == 21400:
+				final_phase = "CLOSED"
+				break
+			_fail("battle snapshot: code=%d %s" % [cur.code, cur.error])
+			return
+		final_phase = str(cur.data.phase)
+		if final_phase != "COMMAND":
+			break
+		var slot: Dictionary = cur.data.open_slots[0]
+		var targets: Array = cur.data.private_actor_states[0].selectable_target_ids
+		var ack: Dictionary = await mmo_a.submit_command(cur.data, slot, { "attack": { "selected_target_id": int(targets[0]) } })
+		if not ack.ok:
+			_fail("round %d submit: code=%d %s" % [int(cur.data.round), ack.code, ack.error])
+			return
+		rounds += 1
+	if final_phase != "SETTLE" and final_phase != "CLOSED":
+		_fail("battle did not settle after %d rounds (phase=%s)" % [rounds, final_phase])
+		return
+	var settled = await _wait_battle_event("battle_settled", 15000)
+	if settled == null:
+		_fail("never saw battle_settled: %s" % JSON.stringify(battle_events))
+		return
+	var kinds := {}
+	for be in battle_events:
+		for k in be.event.payload.keys():
+			kinds[k] = true
+	for want in ["phase_changed", "initiative_resolved", "damage_dealt", "battle_settled"]:
+		if not kinds.has(want):
+			_fail("missing public battle event %s, saw %s" % [want, JSON.stringify(kinds.keys())])
+			return
+	print("battle settled after %d rounds: winner_side=%d events=%s" % [rounds, int(settled.event.payload.battle_settled.winner_side), JSON.stringify(kinds.keys())])
+	# 退出战斗的正路:先重新 enter 场景(epoch+1),再退订战斗 Room;之后又能移动。
+	var epoch_before := mmo_a.session_epoch
+	var back: Dictionary = await mmo_a.enter(SCENE, a.device_id)
+	if not back.ok or mmo_a.session_epoch != epoch_before + 1:
+		_fail("re-enter after battle: code=%d %s epoch %d -> %d" % [back.code, back.error, epoch_before, mmo_a.session_epoch])
+		return
+	await mmo_a.leave_battle()
+	var free: Dictionary = await mmo_a.move_to(50 * DemoMmoSceneService.FIXED, 50 * DemoMmoSceneService.FIXED)
+	if not free.ok:
+		_fail("move after battle: code=%d %s" % [free.code, free.error])
+		return
+	print("  ok: 21613 in battle / transition resume / slots private-only / 21402 / settled / back in scene")
+
+	print("== [9/9] B leave → A 收到 role_left;snapshot 只剩 A ==")
 	var lb: Dictionary = await mmo_b.leave()
 	if not lb.ok:
 		_fail("leave B: %s" % lb.error)
@@ -336,6 +452,26 @@ func _admin_post(token: String, path: String, body: Dictionary) -> Dictionary:
 	if typeof(parsed) != TYPE_DICTIONARY or int(parsed.get("code", -1)) != 0:
 		return { "ok": false, "error": str(parsed) }
 	return { "ok": true, "data": parsed.data }
+
+
+func _wait_battle_event(payload_key: String, timeout_ms: int):
+	var deadline := Time.get_ticks_msec() + timeout_ms
+	while Time.get_ticks_msec() < deadline:
+		for e in battle_events:
+			if e.event.payload.has(payload_key):
+				return e
+		await process_frame
+	return null
+
+
+func _sleep(seconds: float) -> void:
+	var t := Timer.new()
+	t.wait_time = seconds
+	t.one_shot = true
+	t.autostart = true
+	root.add_child(t)
+	await t.timeout
+	t.queue_free()
 
 
 func _wait_move(entity_id: int, movement_seq: int, timeout_ms: int):
