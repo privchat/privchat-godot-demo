@@ -3,6 +3,7 @@
 # 前置: privchat-server(:9001) + privchat-application(含 module-mmorpg,:8080) + redis
 #
 # 覆盖(MMO_WORLD_SCENE_SPEC §12 的闭环):
+#   [0] 后台开场景:admin 登录 → POST /admin/mmo/scenes(幂等);玩家进未开的场景 → 21600
 #   [1] 双账号登录,各自 ensure 角色
 #   [2] A enter 场景 → channel + ticket + scene_session,订阅 Room
 #   [3] A 心跳 mmorpg/scene/heartbeat → code 0,回报 public_scene_seq
@@ -21,6 +22,10 @@ const DemoMmoSceneService := preload("res://scripts/mmo_scene_service.gd")
 const MOBILE_A := "+8613800000001"
 const MOBILE_B := "+8613800000002"
 const SCENE := "l-10023-7"
+## 后台账号(共享开发环境的种子管理员);场景是运营内容,由后台开,玩家进不了没开的场景。
+var ADMIN_API := DemoEnv.service_api().replace(":9090", ":8080") + "/admin"
+const ADMIN_USER := "admin"
+const ADMIN_PASSWORD := "admin123"
 
 var presence_a: Array = []
 var moves_b: Array = []
@@ -48,6 +53,17 @@ func _fail(step: String) -> void:
 func _run() -> void:
 	await process_frame
 	await process_frame
+
+	print("== [0/8] 后台开场景 %s ==" % SCENE)
+	var admin_token := await _admin_login()
+	if admin_token.is_empty():
+		_fail("admin login")
+		return
+	var opened: Dictionary = await _admin_post(admin_token, "/mmo/scenes", { "scene_ref": SCENE })
+	if not opened.ok:
+		_fail("admin open scene: %s" % opened.error)
+		return
+	print("scene open: channel_id=%s status=%s" % [str(opened.data.channel_id), str(opened.data.status)])
 
 	print("== [1/8] 双账号登录 + ensure 角色 ==")
 	var a = await _login(MOBILE_A, "user://privchat-mmo-a")
@@ -78,6 +94,13 @@ func _run() -> void:
 		_fail("ensure role B: %s" % rb.error)
 		return
 	print("roles: A=%d B=%d" % [mmo_a.role_id, mmo_b.role_id])
+
+	# 没开的场景进不去:这是后台开场景这条规则在客户端看到的样子。
+	var closed: Dictionary = await mmo_a.enter("l-424242-1", a.device_id)
+	if closed.code != 21600:
+		_fail("entering an unopened scene must be 21600, got code=%d %s" % [closed.code, closed.error])
+		return
+	print("  ok: unopened scene -> 21600")
 
 	print("== [2/8] A enter %s ==" % SCENE)
 	var ea: Dictionary = await mmo_a.enter(SCENE, a.device_id)
@@ -220,6 +243,40 @@ func _run() -> void:
 	await mmo_b.close()
 	print("VERIFY_OK")
 	quit(0)
+
+
+func _admin_login() -> String:
+	var req := HTTPRequest.new()
+	root.add_child(req)
+	var err: int = req.request(ADMIN_API + "/system/auth/login", ["Content-Type: application/json"],
+			HTTPClient.METHOD_POST, JSON.stringify({ "username": ADMIN_USER, "password": ADMIN_PASSWORD }))
+	if err != OK:
+		req.queue_free()
+		return ""
+	var resp: Array = await req.request_completed
+	req.queue_free()
+	var parsed = JSON.parse_string(resp[3].get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY or int(parsed.get("code", -1)) != 0:
+		print("admin login failed: %s" % str(parsed))
+		return ""
+	return str(parsed.data.get("accessToken", ""))
+
+
+func _admin_post(token: String, path: String, body: Dictionary) -> Dictionary:
+	var req := HTTPRequest.new()
+	root.add_child(req)
+	var err: int = req.request(ADMIN_API + path,
+			["Content-Type: application/json", "Authorization: Bearer %s" % token],
+			HTTPClient.METHOD_POST, JSON.stringify(body))
+	if err != OK:
+		req.queue_free()
+		return { "ok": false, "error": "http request error %d" % err }
+	var resp: Array = await req.request_completed
+	req.queue_free()
+	var parsed = JSON.parse_string(resp[3].get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY or int(parsed.get("code", -1)) != 0:
+		return { "ok": false, "error": str(parsed) }
+	return { "ok": true, "data": parsed.data }
 
 
 func _wait_move(entity_id: int, timeout_ms: int):

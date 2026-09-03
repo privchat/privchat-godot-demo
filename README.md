@@ -105,7 +105,7 @@ done
 | `auto_robustness_check` | 误用与生命周期:未 start 调用、close 排空、状态抖动、超时不泄漏、二进制 transfer |
 | `auto_token_check` | 真实刷新、single-flight、终态不循环、两个竞态、刷新期本地读 |
 | `auto_navigation_check` | 会话列表 → 聊天页:`channel_id`/`channel_type` 传递、消费后清零、logout 清理 |
-| `auto_mmo_check` | module-mmorpg 场景闭环(MMO_WORLD_SCENE_SPEC §12):双角色 enter 同一场景 → 同一 Room channel;`mmorpg/scene/heartbeat` transfer;对方 enter/leave 的 presence 事件;错误码 21607/21610/21601 原样到达;private-snapshot 重连恢复;重进使旧 session 失效 |
+| `auto_mmo_check` | module-mmorpg 场景闭环(MMO_WORLD_SCENE_SPEC §12):后台 `admin/admin123` 开场景(玩家进未开场景 → 21600);双角色 enter 同一场景 → 同一 Room channel;`mmorpg/scene/heartbeat` transfer;对方 enter/leave 的 presence 事件;错误码 21607/21610/21601 原样到达;private-snapshot 重连恢复;重进使旧 session 失效 |
 
 ## 版本
 
