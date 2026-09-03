@@ -9,7 +9,8 @@ const SCENE_REF := "l-10023-7"
 const MAP_UNITS := 100                      # 服务端平地 100x100 世界单位
 const MAP_PX := 560
 
-var service: DemoMmoSceneService = null
+# 不按 class_name 定类型:headless / 未经编辑器扫描的运行没有全局类缓存。
+var service = null
 var map_view: Control
 var status_label: Label
 var log_view: RichTextLabel
@@ -127,9 +128,9 @@ func request_move(px: Vector2) -> void:
 	if service == null or service.scene_session_id == 0:
 		return
 	@warning_ignore("integer_division")
-	var x := int(px.x) * MAP_UNITS * DemoMmoSceneService.FIXED / MAP_PX
+	var x := int(px.x) * MAP_UNITS * MmoSceneService.FIXED / MAP_PX
 	@warning_ignore("integer_division")
-	var y := int(px.y) * MAP_UNITS * DemoMmoSceneService.FIXED / MAP_PX
+	var y := int(px.y) * MAP_UNITS * MmoSceneService.FIXED / MAP_PX
 	var ack: Dictionary = await service.move_to(x, y)
 	if not ack.ok:
 		_log("[color=red]移动被拒(%d):%s[/color]" % [ack.code, ack.error])
@@ -162,8 +163,17 @@ func _on_presence(event: String, role_id: int, role_name: String, _seq: int, _ra
 func current_position(entry: Dictionary) -> Vector2i:
 	if entry.has("movement"):
 		var now_ms := int(Time.get_unix_time_from_system() * 1000.0) + clock_offset_ms
-		return DemoMmoSceneService.position_on_path(entry.movement, now_ms)
+		return MmoSceneService.position_on_path(entry.movement, now_ms)
 	return entry.get("position", Vector2i.ZERO)
+
+
+## 定点世界坐标 → 地图视图像素。
+func world_to_px(p: Vector2i, view_size: Vector2) -> Vector2:
+	return Vector2(p.x, p.y) * view_size.x / float(MAP_UNITS * MmoSceneService.FIXED)
+
+
+func is_my_role(rid: int) -> bool:
+	return service != null and rid == service.role_id
 
 
 func _process(_delta: float) -> void:
@@ -199,12 +209,12 @@ class MapView extends Control:
 		for rid in owner_scene.roles:
 			var entry: Dictionary = owner_scene.roles[rid]
 			var p: Vector2i = owner_scene.current_position(entry)
-			var px := Vector2(p.x, p.y) * size.x / float(MAP_UNITS * DemoMmoSceneService.FIXED)
-			var mine: bool = owner_scene.service != null and rid == owner_scene.service.role_id
+			var px: Vector2 = owner_scene.world_to_px(p, size)
+			var mine: bool = owner_scene.is_my_role(rid)
 			if entry.has("movement"):
 				var pts: Array = entry.movement.get("path_points", [])
 				if not pts.is_empty():
-					var t := Vector2(int(pts[0].x), int(pts[0].y)) * size.x / float(MAP_UNITS * DemoMmoSceneService.FIXED)
+					var t: Vector2 = owner_scene.world_to_px(Vector2i(int(pts[0].x), int(pts[0].y)), size)
 					draw_line(px, t, Color(0.5, 0.5, 0.5, 0.6), 1.0)
 			draw_circle(px, 9.0, Color(0.95, 0.75, 0.2) if mine else Color(0.4, 0.7, 1.0))
 			draw_string(ThemeDB.fallback_font, px + Vector2(-20, -14), str(entry.get("name", "")), HORIZONTAL_ALIGNMENT_CENTER, 40, 12)
