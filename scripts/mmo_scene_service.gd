@@ -19,6 +19,7 @@ const PROTOCOL_VERSION := 1
 const TOPIC_PUBLIC := "mmorpg.scene.public"
 const ROUTE_HEARTBEAT := "mmorpg/scene/heartbeat"
 const ROUTE_MOVE := "mmorpg/scene/move"
+const ROUTE_INTERACT := "mmorpg/scene/interact"
 
 ## 定点坐标:1 = 1/1000 世界单位,原点左上,+x 右 +y 下;三端一律向零取整。
 const FIXED := 1000
@@ -91,7 +92,8 @@ func enter(p_scene_ref: String, device_id: String) -> Dictionary:
 	if not resp.ok:
 		return resp
 	scene_ref = p_scene_ref
-	channel_id = int(resp.data.channel_id)
+	# 64 位 id 以字符串传输(超过 2^53 的 JSON 数字在 GDScript 里会丢精度)。
+	channel_id = int(str(resp.data.channel_id))
 	scene_session_id = int(resp.data.scene_session_id)
 	session_epoch = int(resp.data.session_epoch)
 	movement_seq = 0   # 序号作用域是 scene_session(spec §9.2)
@@ -149,30 +151,29 @@ func stop() -> Dictionary:
 	})
 
 
-## 按服务端的路径参数推算 t 时刻(服务端时钟,Unix ms)的位置。与服务端同一
-## 套整数算法、向零取整,所以两端算出的是同一个点。
+## 按服务端的路径参数推算 t 时刻(服务端时钟,Unix ms)的位置:从起点沿点列逐段
+## 匀速走,走完停在最后一点。与服务端同一套整数算法、向零取整,两端算出同一个点。
 static func position_on_path(movement: Dictionary, server_now_ms: int) -> Vector2i:
 	var start: Dictionary = movement.get("authoritative_start_position", {})
-	var sx := int(start.get("x", 0))
-	var sy := int(start.get("y", 0))
+	var from := Vector2i(int(start.get("x", 0)), int(start.get("y", 0)))
 	var points: Array = movement.get("path_points", [])
 	var speed := int(movement.get("speed", 0))
 	if points.is_empty() or speed <= 0:
-		return Vector2i(sx, sy)
-	var tx := int(points[0].get("x", sx))
-	var ty := int(points[0].get("y", sy))
-	var dx := tx - sx
-	var dy := ty - sy
-	var total := _isqrt(dx * dx + dy * dy)
-	if total == 0:
-		return Vector2i(tx, ty)
+		return from
 	var elapsed: int = maxi(server_now_ms - int(movement.get("start_time_ms", 0)), 0)
 	@warning_ignore("integer_division")
 	var travelled: int = speed * elapsed / 1000
-	if travelled >= total:
-		return Vector2i(tx, ty)
-	@warning_ignore("integer_division")
-	return Vector2i(sx + dx * travelled / total, sy + dy * travelled / total)
+	for pt in points:
+		var to := Vector2i(int(pt.get("x", from.x)), int(pt.get("y", from.y)))
+		var dx := to.x - from.x
+		var dy := to.y - from.y
+		var seg := _isqrt(dx * dx + dy * dy)
+		if travelled < seg:
+			@warning_ignore("integer_division")
+			return Vector2i(from.x + dx * travelled / seg, from.y + dy * travelled / seg)
+		travelled -= seg
+		from = to
+	return from
 
 
 static func _isqrt(n: int) -> int:
@@ -186,6 +187,23 @@ static func _isqrt(n: int) -> int:
 		@warning_ignore("integer_division")
 		y = (x + n / x) / 2
 	return x
+
+
+# --- NPC 交互 ---------------------------------------------------------------
+
+## 与 NPC 交互。在不在交互距离内由服务端按权威位置判:不在 → 21612;不存在 → 21611。
+## 返回 { ok, code, data: { npc_id, name, kind, dialog, options }, error }。
+func interact(npc_id: int) -> Dictionary:
+	return await transfer(ROUTE_INTERACT, {
+		"protocol_version": PROTOCOL_VERSION,
+		"scene_session_id": scene_session_id,
+		"npc_id": npc_id,
+	})
+
+
+## 地图静态数据(格子、阻挡、出生点),进场景后按 snapshot 的 map_id 拉一次。
+func fetch_map(map_id: int) -> Dictionary:
+	return await _app("GET", "/mmo/maps/%d" % map_id)
 
 
 # --- 心跳 -------------------------------------------------------------------

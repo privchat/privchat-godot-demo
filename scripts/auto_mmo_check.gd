@@ -11,6 +11,7 @@
 #   [5] 错误码原样到达:别人的 session → 21607;未知 route → 21610
 #   [6] 重连恢复:private-snapshot 拿回同一 scene_session_id;A 重进 → epoch+1,旧 session 心跳 → 21601
 #   [7] A move_to → ACK;B 收到 scene.movement_started(A) 的权威路径;越界 21603;
+#       目标在障碍另一侧 → 服务端寻路绕行(path_points ≥ 2);NPC 交互:太远 21612 → 走近后 ok;
 #       同 request_id 重试 → replayed;旧序号 → 21605;stop 占用序号;snapshot 带位置
 #   [8] B leave → A 收到 scene.role_left;public snapshot 只剩 A
 extends SceneTree
@@ -121,7 +122,7 @@ func _run() -> void:
 	if not eb.ok:
 		_fail("enter B: %s" % eb.error)
 		return
-	if mmo_b.channel_id != mmo_a.channel_id:
+	if mmo_b.channel_id != mmo_a.channel_id or mmo_a.channel_id <= 0:
 		_fail("scene channel differs: A=%d B=%d (idempotent provisioning broken)" % [mmo_a.channel_id, mmo_b.channel_id])
 		return
 	var ev = await _wait_presence("scene.role_entered", mmo_b.role_id, 15000)
@@ -168,11 +169,14 @@ func _run() -> void:
 	print("== [7/8] A move_to → B 收到 movement_started;拒绝码;幂等回放;stop ==")
 	var target_x := int(DemoMmoSceneService.FIXED * 70)
 	var target_y := int(DemoMmoSceneService.FIXED * 40)
+	# Room 会给迟到的订阅者回放历史广播:B 订阅时已经收到了以前跑出来的旧移动事件。
+	# 只认这次 move_to 之后、序号匹配的那条。
+	moves_b.clear()
 	var mv: Dictionary = await mmo_a.move_to(target_x, target_y)
 	if not mv.ok or int(mv.data.get("accepted_movement_seq", 0)) != 1 or bool(mv.data.get("replayed", true)):
 		_fail("move_to: code=%d %s data=%s" % [mv.code, mv.error, JSON.stringify(mv.data)])
 		return
-	var started = await _wait_move(mmo_a.role_id, 15000)
+	var started = await _wait_move(mmo_a.role_id, int(mv.data.accepted_movement_seq), 15000)
 	if started == null:
 		_fail("B never saw movement_started for A: %s" % JSON.stringify(moves_b))
 		return
@@ -216,6 +220,61 @@ func _run() -> void:
 		_fail("stopped position should be strictly between spawn and target, got x=%d" % px)
 		return
 	print("  ok: 21603 / 21605 / stop@seq2, stopped at (%d,%d)" % [px, int(me.state.position.y)])
+
+	# 寻路:种子地图「长安城郊」在 x 65..100、y 55..62.5 有一堵墙,从出生点 (50,50)
+	# 到 (90,66) 的直线必穿墙,服务端必须绕行。
+	var detour: Dictionary = await mmo_a.move_to(90 * DemoMmoSceneService.FIXED, 66 * DemoMmoSceneService.FIXED)
+	if not detour.ok:
+		_fail("detour move: code=%d %s" % [detour.code, detour.error])
+		return
+	var snap3: Dictionary = await mmo_a.public_snapshot()
+	var me3 = null
+	for r in snap3.data.roles:
+		if int(r.role_id) == mmo_a.role_id:
+			me3 = r
+	var det_pts: Array = me3.state.movement.path_points if me3 != null and me3.state.get("movement") != null else []
+	if det_pts.size() < 2:
+		_fail("path around the obstacle must have >= 2 points, got %s" % JSON.stringify(det_pts))
+		return
+	var blocked: Dictionary = await mmo_a.move_to(80 * DemoMmoSceneService.FIXED, 58 * DemoMmoSceneService.FIXED)
+	if blocked.code != 21603:
+		_fail("target inside an obstacle must be 21603, got code=%d" % blocked.code)
+		return
+	mmo_a.movement_seq -= 1
+	# NPC:从当前位置直接交互太远 → 21612;走到旁边(等到达)再交互 → 对话。
+	var npc_id := int(snap3.data.npcs[0].npc_id)
+	var npc_pos: Dictionary = snap3.data.npcs[0].position
+	var far: Dictionary = await mmo_a.interact(npc_id)
+	if far.code != 21612:
+		_fail("interact from far away must be 21612, got code=%d %s" % [far.code, far.error])
+		return
+	var walk: Dictionary = await mmo_a.move_to(int(npc_pos.x) + 1500, int(npc_pos.y))
+	if not walk.ok:
+		_fail("walk to npc: code=%d %s" % [walk.code, walk.error])
+		return
+	# 等服务端权威位置走到:按快照里的路径参数算到达时刻,再稍等一点。
+	var arrive_deadline := Time.get_ticks_msec() + 40000
+	var near := false
+	while Time.get_ticks_msec() < arrive_deadline:
+		var probe: Dictionary = await mmo_a.interact(npc_id)
+		if probe.ok:
+			print("NPC %s:%s" % [probe.data.name, probe.data.dialog])
+			near = true
+			break
+		if probe.code != 21612:
+			_fail("interact: code=%d %s" % [probe.code, probe.error])
+			return
+		var t := Timer.new()
+		t.wait_time = 1.0
+		t.one_shot = true
+		t.autostart = true
+		root.add_child(t)
+		await t.timeout
+		t.queue_free()
+	if not near:
+		_fail("never got within interact range of npc %d" % npc_id)
+		return
+	print("  ok: detour (%d points) / 21603 in obstacle / 21612 then dialog" % det_pts.size())
 
 	print("== [8/8] B leave → A 收到 role_left;snapshot 只剩 A ==")
 	var lb: Dictionary = await mmo_b.leave()
@@ -279,11 +338,11 @@ func _admin_post(token: String, path: String, body: Dictionary) -> Dictionary:
 	return { "ok": true, "data": parsed.data }
 
 
-func _wait_move(entity_id: int, timeout_ms: int):
+func _wait_move(entity_id: int, movement_seq: int, timeout_ms: int):
 	var deadline := Time.get_ticks_msec() + timeout_ms
 	while Time.get_ticks_msec() < deadline:
 		for e in moves_b:
-			if e.entity_id == entity_id:
+			if e.entity_id == entity_id and int(e.movement.get("movement_seq", -1)) == movement_seq:
 				return e
 		await process_frame
 	return null

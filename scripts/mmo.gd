@@ -17,6 +17,10 @@ var log_view: RichTextLabel
 
 ## role_id → { name, movement: Dictionary(MovementStarted 镜像) 或 position: Vector2i }
 var roles: Dictionary = {}
+## 地图静态数据(MapResponse);null = 未加载。
+var map_data = null
+## npc_id → NpcDto
+var npcs: Dictionary = {}
 ## 服务端时钟 - 本地时钟(ms),由 snapshot 的 server_time_ms 估计。
 var clock_offset_ms: int = 0
 
@@ -98,10 +102,19 @@ func _refresh_snapshot() -> void:
 		_log("[color=red]snapshot 失败:%s[/color]" % snap.error)
 		return
 	clock_offset_ms = int(snap.data.server_time_ms) - int(Time.get_unix_time_from_system() * 1000.0)
+	if map_data == null or int(map_data.map_id) != int(snap.data.map_id):
+		var m: Dictionary = await service.fetch_map(int(snap.data.map_id))
+		if m.ok:
+			map_data = m.data
+			_log("地图:%s(%dx%d 格,每格 %d)" % [map_data.name, int(map_data.width_cells), int(map_data.height_cells), int(map_data.cell_size)])
+	npcs.clear()
+	for n in snap.data.npcs:
+		npcs[int(n.npc_id)] = n
 	roles.clear()
 	for r in snap.data.roles:
 		var st: Dictionary = r.state
-		var entry := { "name": str(r.role_name), "position": Vector2i(int(st.position.x), int(st.position.y)) }
+		var entry := { "name": str(r.role_name), "position": Vector2i(int(st.position.x), int(st.position.y)),
+				"entity_version": int(st.entity_version) }
 		if st.get("movement") != null:
 			entry["movement"] = st.movement
 		roles[int(r.role_id)] = entry
@@ -123,7 +136,7 @@ func _heartbeat_loop() -> void:
 			await _refresh_snapshot()
 
 
-## 点击地图:像素 → 定点世界坐标,发移动意图。
+## 点击地图:像素 → 定点世界坐标。点在 NPC 上 → 交互;否则发移动意图。
 func request_move(px: Vector2) -> void:
 	if service == null or service.scene_session_id == 0:
 		return
@@ -131,6 +144,18 @@ func request_move(px: Vector2) -> void:
 	var x := int(px.x) * MAP_UNITS * MmoSceneService.FIXED / MAP_PX
 	@warning_ignore("integer_division")
 	var y := int(px.y) * MAP_UNITS * MmoSceneService.FIXED / MAP_PX
+	for nid in npcs:
+		var n: Dictionary = npcs[nid]
+		var npx: Vector2 = world_to_px(Vector2i(int(n.position.x), int(n.position.y)), map_view.size)
+		if npx.distance_to(px) <= 12.0:
+			var r: Dictionary = await service.interact(int(nid))
+			if r.ok:
+				_log("[color=yellow]%s:%s[/color]" % [r.data.name, r.data.dialog])
+			elif r.code == 21612:
+				_log("离 %s 太远,先走过去" % str(n.name))
+			else:
+				_log("[color=red]交互失败(%d):%s[/color]" % [r.code, r.error])
+			return
 	var ack: Dictionary = await service.move_to(x, y)
 	if not ack.ok:
 		_log("[color=red]移动被拒(%d):%s[/color]" % [ack.code, ack.error])
@@ -141,7 +166,12 @@ func request_move(px: Vector2) -> void:
 
 
 func _on_movement_started(entity_id: int, movement: Dictionary, _seq: int) -> void:
-	var entry: Dictionary = roles.get(entity_id, { "name": "#%d" % entity_id })
+	var entry: Dictionary = roles.get(entity_id, { "name": "#%d" % entity_id, "entity_version": 0 })
+	# 位置类状态按 entity_version 覆盖(spec §3.2):Room 回放的历史事件、乱序迟到的
+	# 旧事件版本号都更小,直接丢弃,不判缺、不请求补发。
+	if int(movement.get("entity_version", 0)) <= int(entry.get("entity_version", 0)):
+		return
+	entry["entity_version"] = int(movement.get("entity_version", 0))
 	entry["movement"] = movement
 	entry.erase("position")
 	roles[entity_id] = entry
@@ -206,6 +236,22 @@ class MapView extends Control:
 			draw_line(Vector2(0, i * step), Vector2(size.x, i * step), Color(0.2, 0.25, 0.2))
 		if owner_scene == null:
 			return
+		# 阻挡格
+		var md = owner_scene.map_data
+		if md != null:
+			var cell_px: float = size.x / float(int(md.width_cells))
+			var rows: Array = md.rows
+			for y in range(rows.size()):
+				var row: String = rows[y]
+				for x in range(row.length()):
+					if row[x] == "#":
+						draw_rect(Rect2(x * cell_px, y * cell_px, cell_px, cell_px), Color(0.35, 0.3, 0.25))
+		# NPC
+		for nid in owner_scene.npcs:
+			var n: Dictionary = owner_scene.npcs[nid]
+			var npx: Vector2 = owner_scene.world_to_px(Vector2i(int(n.position.x), int(n.position.y)), size)
+			draw_circle(npx, 8.0, Color(0.3, 0.9, 0.4))
+			draw_string(ThemeDB.fallback_font, npx + Vector2(-24, -12), str(n.name), HORIZONTAL_ALIGNMENT_CENTER, 48, 11)
 		for rid in owner_scene.roles:
 			var entry: Dictionary = owner_scene.roles[rid]
 			var p: Vector2i = owner_scene.current_position(entry)
