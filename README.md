@@ -40,6 +40,11 @@ openssl x509 -in privchat-server/certs/server.crt -pubkey -noout \
   | openssl dgst -sha256 -binary | openssl base64
 ```
 
+> 排错提示:`sms-login` 返回 `application code=4` 且 application 日志里是
+> `privchat_devices_user_id_fkey`,说明演示账号(+86138…01/02)在 server 当前使用的
+> 数据库里不存在——共享 server 曾切换过库(`privchat` → `privchat_dev`),把
+> `privchat_users` 里这两行拷过去即可,不是代码问题。
+>
 > 排错提示:`tls handshake eof` 表示对端在讲明文 —— 多半是 server 进程
 > 早于 TLS 支持启动,重启一次即可,不是 pin 配错。pin 不匹配报的是证书
 > 校验失败,两者症状不同。
@@ -73,12 +78,12 @@ $GODOT -e --path $DEMO
 $GODOT --headless --path $DEMO -s res://scripts/auto_chat_check.gd
 ```
 
-全部 8 条:
+全部 9 条:
 
 ```bash
 for s in auto_login_check auto_comm_check auto_chat_check auto_game_check \
          auto_resilience_check auto_robustness_check auto_token_check \
-         auto_navigation_check; do
+         auto_navigation_check auto_mmo_check; do
   echo -n "$s => "
   $GODOT --headless --path $DEMO -s res://scripts/$s.gd 2>&1 \
     | grep -E 'VERIFY_OK|VERIFY_FAILED'
@@ -100,6 +105,7 @@ done
 | `auto_robustness_check` | 误用与生命周期:未 start 调用、close 排空、状态抖动、超时不泄漏、二进制 transfer |
 | `auto_token_check` | 真实刷新、single-flight、终态不循环、两个竞态、刷新期本地读 |
 | `auto_navigation_check` | 会话列表 → 聊天页:`channel_id`/`channel_type` 传递、消费后清零、logout 清理 |
+| `auto_mmo_check` | module-mmorpg 场景闭环(MMO_WORLD_SCENE_SPEC §12):双角色 enter 同一场景 → 同一 Room channel;`mmorpg/scene/heartbeat` transfer;对方 enter/leave 的 presence 事件;错误码 21607/21610/21601 原样到达;private-snapshot 重连恢复;重进使旧 session 失效 |
 
 ## 版本
 
