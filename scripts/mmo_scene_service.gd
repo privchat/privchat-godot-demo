@@ -30,6 +30,7 @@ const ROUTE_INTERACT := "mmorpg/scene/interact"
 const ROUTE_BATTLE_COMMAND := "mmorpg/battle/command"
 const ROUTE_BATTLE_INSTANT := "mmorpg/battle/instant"
 const TOPIC_BATTLE_PUBLIC := "mmorpg.battle.public"
+const ROUTE_BATTLE_EVENT := "mmorpg/battle/event"
 
 ## 定点坐标:1 = 1/1000 世界单位,原点左上,+x 右 +y 下;三端一律向零取整。
 const FIXED := 1000
@@ -43,6 +44,9 @@ signal rejoined(ok: bool, error: String)
 ## 战斗 PUBLIC 事件(BattleEventBatchEnvelope 里的一条 BattleEvent;已按 stream_seq 去重)。
 ## payload 是单键对象:phase_changed / initiative_resolved / damage_dealt / actor_died / battle_settled。
 signal battle_event(battle_id: int, event: Dictionary, stream_seq: int)
+## 战斗 PRIVATE 事件(服务端定向 transfer,route mmorpg/battle/event;已按 stream_seq 去重)。
+## payload:slots_offered(可提交的行动机会)/ command_accepted。
+signal battle_private_event(battle_id: int, event: Dictionary, stream_seq: int)
 
 var client: PrivchatClient = null
 var sub: PrivchatSubscription = null
@@ -67,6 +71,7 @@ var battle_id: int = 0
 var battle_channel_id: int = 0
 var transition_id: int = 0
 var battle_public_seq: int = 0
+var battle_private_seq: int = 0
 ## (battle_id, actor_id) 内递增的 action_seq;被拒的提交不占用。
 var action_seq: int = 0
 
@@ -256,12 +261,14 @@ func _join_battle(resp: Dictionary) -> Dictionary:
 	battle_id = int(resp.data.battle_id)
 	battle_channel_id = int(str(resp.data.channel_id))
 	battle_public_seq = 0
+	battle_private_seq = 0
 	action_seq = 0
 	if battle_sub == null:
 		battle_sub = PrivchatSubscription.new()
 		add_child(battle_sub)
 		battle_sub.setup(client)
 		battle_sub.message_received.connect(_on_battle_message)
+		battle_sub.transfer_received.connect(_on_battle_transfer)
 	if battle_sub.is_subscribed():
 		await battle_sub.unsubscribe()
 	var joined: Dictionary = await battle_sub.subscribe(battle_channel_id, str(resp.data.ticket))
@@ -349,6 +356,23 @@ func _on_battle_message(payload_text: String, _bytes: PackedByteArray, _topic: S
 			continue
 		battle_public_seq = seq
 		battle_event.emit(bid, e, seq)
+
+
+## PRIVATE 事件走定向 transfer 而不是 Room 广播:指令在 RESOLVE 前不得泄漏给别人(spec §6.2)。
+func _on_battle_transfer(route: String, payload_text: String, _bytes: PackedByteArray, _request_id: String) -> void:
+	if route != ROUTE_BATTLE_EVENT:
+		return
+	var parsed = JSON.parse_string(payload_text)
+	if typeof(parsed) != TYPE_DICTIONARY or int(parsed.get("battle_id", 0)) != battle_id:
+		return
+	if str(parsed.get("visibility", "")) != "PRIVATE" or int(parsed.get("recipient_role_id", 0)) != role_id:
+		return
+	for e in parsed.get("events", []):
+		var seq := int(e.get("stream_seq", 0))
+		if seq <= battle_private_seq:
+			continue
+		battle_private_seq = seq
+		battle_private_event.emit(battle_id, e, seq)
 
 
 # --- 心跳 -------------------------------------------------------------------

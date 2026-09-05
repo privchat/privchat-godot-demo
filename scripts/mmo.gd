@@ -101,6 +101,7 @@ func _start() -> void:
 	service.presence.connect(_on_presence)
 	service.movement_started.connect(_on_movement_started)
 	service.battle_event.connect(_on_battle_event)
+	service.battle_private_event.connect(_on_battle_private_event)
 	service.rejoined.connect(func(ok, err): _log("重连后重订阅:%s %s" % ["ok" if ok else "失败", err]))
 
 	var role: Dictionary = await service.ensure_role("gd-%d" % PrivchatSession.user_id)
@@ -306,6 +307,17 @@ func _on_battle_event(_bid: int, event: Dictionary, _seq: int) -> void:
 			"battle_settled":
 				_log("[color=orange]战斗结束:winner_side=%d[/color]" % int(body.winner_side))
 				await _refresh_battle()
+
+
+## PRIVATE 事件(定向 transfer):slots_offered 到达即刷新按钮——这是事件驱动的正路,
+## snapshot 只是漏收后的兜底。
+func _on_battle_private_event(_bid: int, event: Dictionary, _seq: int) -> void:
+	var payload: Dictionary = event.get("payload", {})
+	if payload.has("slots_offered"):
+		_log("收到行动机会(%d 个 slot)" % payload.slots_offered.slots.size())
+		await _refresh_battle()
+	elif payload.has("command_accepted"):
+		_log("服务端受理 slot=%d seq=%d" % [int(payload.command_accepted.command_slot_id), int(payload.command_accepted.accepted_action_seq)])
 
 
 ## 退出战斗的正路(§7.2 / §15.2):先重新 enter 场景拿新 ticket,再退订战斗 Room。

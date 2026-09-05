@@ -14,7 +14,8 @@
 #       目标在障碍另一侧 → 服务端寻路绕行(path_points ≥ 2);NPC 交互:太远 21612 → 走近后 ok;
 #       同 request_id 重试 → replayed;旧序号 → 21605;stop 占用序号;snapshot 带位置
 #   [8] A 走到可战 NPC → interact options 含 "battle" → 发起战斗(READY,战斗 Room 订阅);
-#       战斗中 move → 21613;private snapshot 给 open_slots;提交 ATTACK → ACK;旧回合重提 → 21402;
+#       战斗中 move → 21613;PRIVATE 定向 transfer 推来 slots_offered(SDK TransferReceived);
+#       private snapshot 给 open_slots;提交 ATTACK → ACK 且收到 command_accepted;旧回合重提 → 21402;
 #       打到结算:public 收到 phase_changed / initiative_resolved / damage_dealt / battle_settled;
 #       重新 enter 场景(epoch+1)→ 退订战斗 Room → 又能移动(MMO_BATTLE_PROTOCOL_SPEC §15.8)
 #   [9] B leave → A 收到 scene.role_left;public snapshot 只剩 A
@@ -35,6 +36,7 @@ const ADMIN_PASSWORD := "admin123"
 var presence_a: Array = []
 var moves_b: Array = []
 var battle_events: Array = []
+var battle_private_events: Array = []
 
 
 func _initialize() -> void:
@@ -283,6 +285,7 @@ func _run() -> void:
 
 	print("== [8/9] 战斗:走到可战 NPC → 发起 → 提交指令 → 结算 → 回场景 ==")
 	mmo_a.battle_event.connect(func(_bid, e, seq): battle_events.append({ "seq": seq, "event": e }))
+	mmo_a.battle_private_event.connect(func(_bid, e, seq): battle_private_events.append({ "seq": seq, "event": e }))
 	var monster = null
 	for n in snap3.data.npcs:
 		if str(n.kind) == "monster":
@@ -322,6 +325,17 @@ func _run() -> void:
 	if not resumed.ok or int(resumed.data.battle_id) != mmo_a.battle_id:
 		_fail("resume via transition: code=%d %s" % [resumed.code, resumed.error])
 		return
+	# PRIVATE 事件:服务端定向 transfer → SDK TransferReceived → PrivchatSubscription.transfer_received。
+	# 第一批 slots_offered 在订阅战斗 Room 之前就发出;server 对未订阅的会话投递失败,outbox 在
+	# 下一次 tick 补投,所以这里要等。
+	var offered = await _wait_private_event("slots_offered", 15000)
+	if offered == null:
+		_fail("never received slots_offered over directed transfer: %s" % JSON.stringify(battle_private_events))
+		return
+	var offered_slots: Array = offered.event.payload.slots_offered.slots
+	if offered_slots.size() != 1 or not offered_slots[0].allowed_commands.has("ATTACK"):
+		_fail("slots_offered must carry one PRIMARY slot allowing ATTACK: %s" % JSON.stringify(offered_slots))
+		return
 	var bs: Dictionary = await mmo_a.battle_private_snapshot()
 	if not bs.ok or str(bs.data.phase) != "COMMAND" or bs.data.open_slots.size() != 1:
 		_fail("battle private snapshot: code=%d %s data=%s" % [bs.code, bs.error, JSON.stringify(bs.data)])
@@ -337,6 +351,13 @@ func _run() -> void:
 	var first_ack: Dictionary = await mmo_a.submit_command(bs.data, slot0, { "attack": { "selected_target_id": int(bs.data.private_actor_states[0].selectable_target_ids[0]) } })
 	if not first_ack.ok or int(first_ack.data.accepted_action_seq) != 1:
 		_fail("submit attack: code=%d %s data=%s" % [first_ack.code, first_ack.error, JSON.stringify(first_ack.data)])
+		return
+	if int(offered_slots[0].command_slot_id) != int(slot0.command_slot_id):
+		_fail("pushed slot %s != snapshot slot %s" % [str(offered_slots[0].command_slot_id), str(slot0.command_slot_id)])
+		return
+	var accepted = await _wait_private_event("command_accepted", 15000)
+	if accepted == null or int(accepted.event.payload.command_accepted.accepted_action_seq) != 1:
+		_fail("never received command_accepted for seq 1: %s" % JSON.stringify(battle_private_events))
 		return
 	# 单人单 slot:提交即结算,回合已翻页;拿旧快照再提 → 21402。
 	var stale_round: Dictionary = await mmo_a.submit_command(bs.data, slot0, { "defend": {} })
@@ -390,7 +411,7 @@ func _run() -> void:
 	if not free.ok:
 		_fail("move after battle: code=%d %s" % [free.code, free.error])
 		return
-	print("  ok: 21613 in battle / transition resume / slots private-only / 21402 / settled / back in scene")
+	print("  ok: 21613 in battle / transition resume / slots via directed transfer + snapshot / command_accepted / 21402 / settled / back in scene")
 
 	print("== [9/9] B leave → A 收到 role_left;snapshot 只剩 A ==")
 	var lb: Dictionary = await mmo_b.leave()
@@ -452,6 +473,16 @@ func _admin_post(token: String, path: String, body: Dictionary) -> Dictionary:
 	if typeof(parsed) != TYPE_DICTIONARY or int(parsed.get("code", -1)) != 0:
 		return { "ok": false, "error": str(parsed) }
 	return { "ok": true, "data": parsed.data }
+
+
+func _wait_private_event(payload_key: String, timeout_ms: int):
+	var deadline := Time.get_ticks_msec() + timeout_ms
+	while Time.get_ticks_msec() < deadline:
+		for e in battle_private_events:
+			if e.event.payload.has(payload_key):
+				return e
+		await process_frame
+	return null
 
 
 func _wait_battle_event(payload_key: String, timeout_ms: int):
