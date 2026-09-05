@@ -97,7 +97,7 @@ done
 
 | 脚本 | 覆盖 |
 |---|---|
-| `auto_login_check` | 短信登录 → authenticate → connect → bootstrap 门禁 |
+| `auto_login_check` | 先 `GET /config/bootstrap` 取服务端配置的注册方式:USERNAME_PASSWORD → 注册新账号 → 账号密码登录 → 错误密码被拒;PHONE_SMS → 短信登录;之后 authenticate → connect → bootstrap 门禁 |
 | `auto_comm_check` | 双账号单聊收发、投递回执、Room 订阅与广播 |
 | `auto_chat_check` | 历史、上滑翻页、已读推进、未读数、会话列表 |
 | `auto_game_check` | 频道订阅 + transfer 指令 + 事件去重 |
