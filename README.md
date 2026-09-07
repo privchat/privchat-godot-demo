@@ -6,6 +6,25 @@ addon 的每次改动都靠这里的 headless e2e 验证。
 `addons/privchat` 是指向 `../privchat-godot/addons/privchat` 的相对软链接;
 链接丢失时用 `ln -sfn ../../privchat-godot/addons/privchat addons/privchat` 恢复。
 
+## 运行
+
+Godot 没装进 PATH,二进制在 staging 目录里;先把两个变量 export 出来,
+下面所有命令(含本文其余部分的 `$GODOT` / `$DEMO`)都能直接用:
+
+```bash
+export GODOT=~/projects/Menghuan/.staging-godot/tools/Godot.app/Contents/MacOS/Godot
+export DEMO=~/projects/Menghuan/privchat-godot-demo
+
+$GODOT --path $DEMO                                    # 图形界面
+$GODOT --headless --path $DEMO -s res://scripts/auto_mmo_check.gd   # headless e2e
+```
+
+图形界面的登录方式由服务端配置决定(`GET /app/config/bootstrap` 的
+`auth.registerModes`,见 `scripts/login.gd`):本机是 `USERNAME_PASSWORD`,
+登录页给的是账号 / 密码 / 昵称与「登录」「注册」;没有账号就直接注册一个
+(账号 3-32 位,密码 8-128 位)。headless 脚本仍用手机号种子账号,
+因为 `sms-login` 在该模式下依然可用。
+
 ## 前置
 
 需要三个服务在跑(**共用的开发服务,不要随意启停**):
