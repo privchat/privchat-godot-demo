@@ -4,7 +4,8 @@
 #
 # 覆盖:
 #   [1] 双账号登录,B 挂 ChatService
-#   [2] A 发 3 条消息;B 的 message_received 信号逐条到达(去重后恰 3 条)
+#   [2] A 发 3 条消息;B 的 message_received 信号逐条到达(去重后恰 3 条);
+#       A 自己也当场看到这 3 条(local-first 回显,reason=local_create)
 #   [3] B open_conversation:历史含全部 3 条且升序(local-first 渲染真源)
 #   [4] B 未读数 >0 -> mark_read 到最后一条 pts -> 未读归零 + unread_changed 信号
 #   [5] B channel_list:频道在列,unread_count 已归零
@@ -21,6 +22,7 @@ const SERVICE_KEY := "your_service_master_key_here"
 const DIRECT_CHANNEL_TYPE := 1
 
 var received_msgs: Array = []
+var echoed_msgs: Array = []
 var unread_events: Array = []
 var room_msgs: Array = []
 
@@ -69,7 +71,14 @@ func _run() -> void:
 	chat_b.unread_changed.connect(func(cid, count): unread_events.append({"channel_id": cid, "count": count}))
 	chat_b.room_message.connect(func(text, publisher, sid): room_msgs.append({"text": text, "publisher": publisher, "sid": sid}))
 
-	print("== [2/6] A 发 3 条,B 信号逐条到达 ==")
+	# A 侧也挂一个 ChatService:本地回显(自己发的消息)必须当场可见,
+	# 否则用户要退出会话再进来才看得到自己刚发的话。
+	var chat_a := PrivchatChatService.new()
+	root.add_child(chat_a)
+	chat_a.setup(client_a)
+	chat_a.message_received.connect(func(m): echoed_msgs.append(m))
+
+	print("== [2/6] A 发 3 条,B 信号逐条到达;A 当场看到自己发的 ==")
 	var ch_resp: Dictionary = await client_a.get_or_create_direct_channel(b.user_id)
 	if not ch_resp.ok:
 		_fail("get_or_create_direct_channel")
@@ -84,6 +93,12 @@ func _run() -> void:
 	if not first_page.ok:
 		_fail("open_conversation(before): %s" % first_page.error)
 		return
+
+	var open_a: Dictionary = await chat_a.open(channel_id, DIRECT_CHANNEL_TYPE)
+	if not open_a.ok:
+		_fail("open_conversation(A): %s" % open_a.error)
+		return
+	echoed_msgs.clear()
 
 	var stamp := int(Time.get_unix_time_from_system())
 	var texts: Array[String] = []
@@ -106,6 +121,18 @@ func _run() -> void:
 			_fail("message %d content mismatch: %s" % [i, received_msgs[i]])
 			return
 	print("3 messages received in order via signal")
+
+	var echo_deadline := Time.get_ticks_msec() + 10000
+	while echoed_msgs.size() < 3 and Time.get_ticks_msec() < echo_deadline:
+		await process_frame
+	if echoed_msgs.size() != 3:
+		_fail("sender local echo: want 3, got %d" % echoed_msgs.size())
+		return
+	for i in range(3):
+		if str(echoed_msgs[i].get("content", "")) != texts[i] or int(echoed_msgs[i].get("from_uid", 0)) != a.user_id:
+			_fail("local echo %d mismatch: %s" % [i, echoed_msgs[i]])
+			return
+	print("3 messages echoed locally to the sender")
 
 	print("== [3/6] open_conversation 历史校验 ==")
 	var page: Dictionary = await chat_b.open(channel_id, DIRECT_CHANNEL_TYPE)

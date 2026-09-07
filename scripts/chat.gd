@@ -205,10 +205,18 @@ func _on_send_pressed() -> void:
 		return
 	msg_edit.clear()
 	var resp: Dictionary = await chat.send_text(content)
-	if resp.ok:
-		_append("[color=gray]（已入队，等待投递回执事件）[/color]")
-	else:
+	if not resp.ok:
 		_append("[color=red]发送失败：%s[/color]" % resp.error)
+		return
+	# 就地把自己的消息画出来。message_received(reason=local_create)也会送来同一条,
+	# 但它要等下一轮事件轮询,而投递回执走的是另一条更快的信号 —— 只靠信号的话
+	# 会先看到「投递状态」再看到自己说的话。_render_stored 按 message_id 去重,
+	# 两条路径重合时不会画两次。
+	_render_stored({
+		"message_id": int(resp.get("message_id", 0)),
+		"from_uid": PrivchatSession.user_id,
+		"content": content,
+	})
 
 
 func _on_message_received(m: Dictionary) -> void:
