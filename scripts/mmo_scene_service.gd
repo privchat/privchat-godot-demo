@@ -296,20 +296,31 @@ func resume_battle(p_transition_id: int) -> Dictionary:
 
 
 func _join_battle(resp: Dictionary) -> Dictionary:
+	var next_battle := int(resp.data.battle_id)
+	var next_channel := int(str(resp.data.channel_id))
 	transition_id = int(resp.data.transition_id)
-	battle_id = int(resp.data.battle_id)
-	battle_channel_id = int(str(resp.data.channel_id))
-	battle_public_seq = 0
-	battle_private_seq = 0
-	action_seq = 0
 	if battle_sub == null:
 		battle_sub = PrivchatSubscription.new()
 		add_child(battle_sub)
 		battle_sub.setup(client)
 		battle_sub.message_received.connect(_on_battle_message)
 		battle_sub.transfer_received.connect(_on_battle_transfer)
+	# 已经在同一个频道上(续接同一场战斗)就什么都不做。
+	#
+	# 退订会把 subscription 的 channel_id 清零,于是**已经发到本端、还排在 SDK 事件
+	# 队列里**的 PRIVATE 事件(典型是首批 slots_offered)会被当成别的频道丢弃;而服务端
+	# 那边它已经算"投递成功",outbox 不会再补投 —— 一次多余的重订阅就永久丢掉一批事件。
+	if battle_sub.is_subscribed() and battle_sub.channel_id == next_channel:
+		battle_id = next_battle
+		return resp
 	if battle_sub.is_subscribed():
 		await battle_sub.unsubscribe()
+	battle_id = next_battle
+	battle_channel_id = next_channel
+	# 换战斗才重置水位与序号:Room 会重放历史,序号从头对账。
+	battle_public_seq = 0
+	battle_private_seq = 0
+	action_seq = 0
 	var joined: Dictionary = await battle_sub.subscribe(battle_channel_id, str(resp.data.ticket))
 	if not joined.ok:
 		return { "ok": false, "data": resp.data, "error": "subscribe battle: %s" % joined.error, "code": -1 }
