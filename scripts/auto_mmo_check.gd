@@ -204,9 +204,11 @@ func _run() -> void:
 		return
 	# 被拒的意图不占序号:客户端回退计数,下一条合法意图仍能被受理。
 	mmo_a.movement_seq -= 1
-	var stale_seq: Dictionary = await mmo_a.transfer(DemoMmoSceneService.ROUTE_MOVE, {
-		"protocol_version": 1, "scene_session_id": mmo_a.scene_session_id, "movement_seq": 1,
-		"command": { "move_to": { "target_position": { "x": 1000, "y": 1000 } } } })
+	var stale_seq: Dictionary = await mmo_a.transfer_fb(DemoMmoSceneService.ROUTE_MOVE,
+		"scene_move_intent", DemoMmoSceneService.NS_SCENE + "MoveIntentEnvelope", {
+			"protocol_version": 1, "scene_session_id": mmo_a.scene_session_id, "movement_seq": 1,
+			"command": { "move_to": { "target_position": { "x": 1000, "y": 1000 } } }, "client_time_ms": 1,
+		}, "scene_move_ack", DemoMmoSceneService.NS_SCENE + "MoveIntentAck")
 	if stale_seq.code != 21605:
 		_fail("stale movement_seq must be 21605, got code=%d %s" % [stale_seq.code, stale_seq.error])
 		return
