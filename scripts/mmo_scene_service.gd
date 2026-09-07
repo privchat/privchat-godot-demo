@@ -22,6 +22,12 @@
 class_name DemoMmoSceneService
 extends Node
 
+## 线格式一律 FlatBuffers(MMO_ARCHITECTURE_SPEC §10.6):route/topic ↔ root 对照见
+## module-mmorpg/protocol/README.md;编解码由 privchat-godot 的通用反射 codec 完成,
+## .bfbs 按摘要固定在 protocol/bfbs/(GODOT_FLATBUFFERS_CODEC_SPEC §7)。
+const NS_SCENE := "privchat.mmorpg.scene."
+const NS_BATTLE := "privchat.mmorpg.battle."
+
 const PROTOCOL_VERSION := 1
 const TOPIC_PUBLIC := "mmorpg.scene.public"
 const ROUTE_HEARTBEAT := "mmorpg/scene/heartbeat"
@@ -65,6 +71,10 @@ var movement_seq: int = 0
 
 var _next_request: int = 1
 
+## 通用 FlatBuffers codec 与各 root 的 schema handle(按 .bfbs 文件名索引)。
+var codec = null
+var schemas: Dictionary = {}
+
 # --- 战斗状态(§7.2 过渡期双订阅:场景 Room 不退,战斗 Room 另开一条订阅)---
 var battle_sub: PrivchatSubscription = null
 var battle_id: int = 0
@@ -84,6 +94,36 @@ func setup(p_client: PrivchatClient, p_access_token: String) -> void:
 	sub.setup(client)
 	sub.message_received.connect(_on_message)
 	sub.resubscribed.connect(func(ok, err): rejoined.emit(ok, err))
+	_load_schemas()
+
+
+## 加载并按摘要固定 .bfbs;摘要不符即拒绝,不允许"差不多的协议"跑起来。
+func _load_schemas() -> void:
+	codec = PrivchatFlatBuffers.new()
+	var sums := FileAccess.get_file_as_string("res://protocol/bfbs/SHA256SUMS")
+	for name in ["scene_heartbeat_request", "scene_heartbeat_ack", "scene_move_intent", "scene_move_ack",
+			"scene_interact_request", "scene_interact_ack", "scene_event",
+			"battle_command", "battle_command_ack", "battle_instant_request", "battle_instant_ack", "battle_event"]:
+		var r: Dictionary = codec.load_schema(FileAccess.get_file_as_bytes("res://protocol/bfbs/%s.bfbs" % name))
+		if not r.ok:
+			push_error("load %s.bfbs: %s" % [name, r.error])
+			continue
+		if not sums.contains(str(r.schema.get_digest())):
+			push_error("%s.bfbs digest %s is not pinned" % [name, r.schema.get_digest()])
+			continue
+		schemas[name] = r.schema
+
+
+func _encode(schema_name: String, root: String, value: Dictionary) -> PackedByteArray:
+	var r: Dictionary = codec.encode(schemas[schema_name], root, value)
+	if not r.ok:
+		push_error("encode %s: %s" % [root, r.error])
+		return PackedByteArray()
+	return r.data
+
+
+func _decode(schema_name: String, root: String, bytes: PackedByteArray) -> Dictionary:
+	return codec.decode(schemas[schema_name], bytes, root)
 
 
 func close() -> void:
@@ -158,25 +198,24 @@ func private_snapshot() -> Dictionary:
 ## 拒绝(21603 越界 / 21605 序号迟到 / 21606 幂等冲突)走外层 code,data 为空。
 func move_to(x: int, y: int) -> Dictionary:
 	movement_seq += 1
-	return await transfer(ROUTE_MOVE, {
-		"protocol_version": PROTOCOL_VERSION,
-		"scene_session_id": scene_session_id,
-		"movement_seq": movement_seq,
-		"command": { "move_to": { "target_position": { "x": x, "y": y } } },
-		"client_time_ms": int(Time.get_unix_time_from_system() * 1000.0),
-	})
+	return await _move({ "move_to": { "target_position": { "x": x, "y": y } } })
 
 
 ## 就地停下。同样占用新的 movement_seq。
 func stop() -> Dictionary:
 	movement_seq += 1
-	return await transfer(ROUTE_MOVE, {
+	return await _move({ "stop": {} })
+
+
+func _move(command: Dictionary) -> Dictionary:
+	var resp := await transfer_fb(ROUTE_MOVE, "scene_move_intent", NS_SCENE + "MoveIntentEnvelope", {
 		"protocol_version": PROTOCOL_VERSION,
 		"scene_session_id": scene_session_id,
 		"movement_seq": movement_seq,
-		"command": { "stop": {} },
+		"command": command,
 		"client_time_ms": int(Time.get_unix_time_from_system() * 1000.0),
-	})
+	}, "scene_move_ack", NS_SCENE + "MoveIntentAck")
+	return resp
 
 
 ## 按服务端的路径参数推算 t 时刻(服务端时钟,Unix ms)的位置:从起点沿点列逐段
@@ -222,11 +261,11 @@ static func _isqrt(n: int) -> int:
 ## 与 NPC 交互。在不在交互距离内由服务端按权威位置判:不在 → 21612;不存在 → 21611。
 ## 返回 { ok, code, data: { npc_id, name, kind, dialog, options }, error }。
 func interact(npc_id: int) -> Dictionary:
-	return await transfer(ROUTE_INTERACT, {
+	return await transfer_fb(ROUTE_INTERACT, "scene_interact_request", NS_SCENE + "InteractRequest", {
 		"protocol_version": PROTOCOL_VERSION,
 		"scene_session_id": scene_session_id,
 		"npc_id": npc_id,
-	})
+	}, "scene_interact_ack", NS_SCENE + "InteractAck")
 
 
 ## 地图静态数据(格子、阻挡、出生点),进场景后按 snapshot 的 map_id 拉一次。
@@ -303,7 +342,7 @@ func battle_public_snapshot() -> Dictionary:
 ## 返回 { ok, code, data: BattleCommandAck, error };拒绝码 21401-21416 原样透出。
 func submit_command(snapshot: Dictionary, slot: Dictionary, payload: Dictionary) -> Dictionary:
 	action_seq += 1
-	var resp: Dictionary = await _battle_transfer(ROUTE_BATTLE_COMMAND, {
+	var resp := await transfer_fb(ROUTE_BATTLE_COMMAND, "battle_command", NS_BATTLE + "BattleCommandEnvelope", {
 		"protocol_version": PROTOCOL_VERSION,
 		"battle_id": battle_id,
 		"role_id": role_id,
@@ -314,7 +353,7 @@ func submit_command(snapshot: Dictionary, slot: Dictionary, payload: Dictionary)
 		"phase_version": int(snapshot.phase_version),
 		"action_seq": action_seq,
 		"payload": payload,
-	})
+	}, "battle_command_ack", NS_BATTLE + "BattleCommandAck", battle_channel_id)
 	if not resp.ok:
 		action_seq -= 1
 	return resp
@@ -322,34 +361,24 @@ func submit_command(snapshot: Dictionary, slot: Dictionary, payload: Dictionary)
 
 ## 认输(即时权威操作,带 state_version 乐观锁 → 21409)。
 func surrender(state_version: int) -> Dictionary:
-	return await _battle_transfer(ROUTE_BATTLE_INSTANT, {
+	return await transfer_fb(ROUTE_BATTLE_INSTANT, "battle_instant_request", NS_BATTLE + "BattleInstantRequest", {
 		"protocol_version": PROTOCOL_VERSION,
 		"battle_id": battle_id,
 		"role_id": role_id,
 		"state_version": state_version,
 		"op": "SURRENDER",
-	})
+	}, "battle_instant_ack", NS_BATTLE + "BattleInstantAck", battle_channel_id)
 
 
-func _battle_transfer(route: String, payload: Dictionary, timeout_ms: int = 8000) -> Dictionary:
-	if not in_battle():
-		return { "ok": false, "code": -1, "data": {}, "error": "not in a battle" }
-	var body := payload.duplicate()
-	body["request_id"] = "gd-b%d-%d" % [role_id, _next_request]
-	_next_request += 1
-	var resp: Dictionary = await client.transfer(battle_channel_id, route, body, timeout_ms)
-	return _parse_transfer(resp)
-
-
-func _on_battle_message(payload_text: String, _bytes: PackedByteArray, _topic: String,
+func _on_battle_message(_payload_text: String, bytes: PackedByteArray, _topic: String,
 		_publisher: String, _sid: int, _ts: int) -> void:
-	var parsed = JSON.parse_string(payload_text)
-	if typeof(parsed) != TYPE_DICTIONARY or str(parsed.get("topic", "")) != TOPIC_BATTLE_PUBLIC:
+	var dec := _decode("battle_event", NS_BATTLE + "BattleEventBatchEnvelope", bytes)
+	if not dec.ok or str(dec.data.get("visibility", "")) != "PUBLIC":
 		return
-	var bid := int(parsed.get("battle_id", 0))
+	var bid := int(dec.data.get("battle_id", 0))
 	if bid != battle_id:
 		return
-	for e in parsed.get("events", []):
+	for e in dec.data.get("events", []):
 		var seq := int(e.get("stream_seq", 0))
 		# Room 会回放历史广播;按 stream_seq 去重,漏号则由业务拉 snapshot。
 		if seq <= battle_public_seq:
@@ -359,15 +388,15 @@ func _on_battle_message(payload_text: String, _bytes: PackedByteArray, _topic: S
 
 
 ## PRIVATE 事件走定向 transfer 而不是 Room 广播:指令在 RESOLVE 前不得泄漏给别人(spec §6.2)。
-func _on_battle_transfer(route: String, payload_text: String, _bytes: PackedByteArray, _request_id: String) -> void:
+func _on_battle_transfer(route: String, _payload_text: String, bytes: PackedByteArray, _request_id: String) -> void:
 	if route != ROUTE_BATTLE_EVENT:
 		return
-	var parsed = JSON.parse_string(payload_text)
-	if typeof(parsed) != TYPE_DICTIONARY or int(parsed.get("battle_id", 0)) != battle_id:
+	var dec := _decode("battle_event", NS_BATTLE + "BattleEventBatchEnvelope", bytes)
+	if not dec.ok or int(dec.data.get("battle_id", 0)) != battle_id:
 		return
-	if str(parsed.get("visibility", "")) != "PRIVATE" or int(parsed.get("recipient_role_id", 0)) != role_id:
+	if str(dec.data.get("visibility", "")) != "PRIVATE" or int(dec.data.get("recipient_role_id", 0)) != role_id:
 		return
-	for e in parsed.get("events", []):
+	for e in dec.data.get("events", []):
 		var seq := int(e.get("stream_seq", 0))
 		if seq <= battle_private_seq:
 			continue
@@ -379,11 +408,34 @@ func _on_battle_transfer(route: String, payload_text: String, _bytes: PackedByte
 
 ## 返回 { ok, code, data: { scene_session_id, server_time_ms, public_scene_seq }, error }。
 func heartbeat(session_override: int = 0) -> Dictionary:
-	return await transfer(ROUTE_HEARTBEAT, {
+	return await transfer_fb(ROUTE_HEARTBEAT, "scene_heartbeat_request", NS_SCENE + "HeartbeatRequest", {
 		"protocol_version": PROTOCOL_VERSION,
 		"scene_session_id": session_override if session_override != 0 else scene_session_id,
 		"client_time_ms": int(Time.get_unix_time_from_system() * 1000.0),
-	})
+	}, "scene_heartbeat_ack", NS_SCENE + "HeartbeatAck")
+
+
+## FlatBuffers transfer:编码 → transfer_bytes → 按应答 root 解码。
+## 返回 { ok, code, data: Dictionary, error };拒绝走外层 code、data 为空。
+func transfer_fb(route: String, req_schema: String, req_root: String, payload: Dictionary,
+		ack_schema: String, ack_root: String, channel: int = 0, timeout_ms: int = 8000) -> Dictionary:
+	var target_channel := channel if channel != 0 else (sub.channel_id if sub != null and sub.is_subscribed() else 0)
+	if target_channel == 0:
+		return { "ok": false, "code": -1, "data": {}, "error": "not subscribed" }
+	var body := payload.duplicate()
+	body["request_id"] = "gd-%d-%d" % [role_id, _next_request]
+	_next_request += 1
+	var bytes := _encode(req_schema, req_root, body)
+	if bytes.is_empty():
+		return { "ok": false, "code": -1, "data": {}, "error": "encode failed" }
+	var resp: Dictionary = await client.transfer_bytes(target_channel, route, bytes, timeout_ms)
+	var out := { "ok": resp.ok, "code": int(resp.get("code", -1)), "data": {}, "error": str(resp.get("error", "")) }
+	if resp.ok and not resp.data.is_empty():
+		var dec := _decode(ack_schema, ack_root, resp.data)
+		if not dec.ok:
+			return { "ok": false, "code": -1, "data": {}, "error": "decode %s: %s" % [ack_root, dec.error] }
+		out.data = dec.data
+	return out
 
 
 ## 任意 mmorpg/<域>/<动作> transfer;request_id 是字符串幂等键(spec §9.2,≤64 字节)。
@@ -418,24 +470,27 @@ func _parse_transfer(resp: Dictionary) -> Dictionary:
 
 # --- 事件 -------------------------------------------------------------------
 
-func _on_message(payload_text: String, _bytes: PackedByteArray, _topic: String,
+func _on_message(_payload_text: String, bytes: PackedByteArray, _topic: String,
 		_publisher: String, _sid: int, _ts: int) -> void:
-	var parsed = JSON.parse_string(payload_text)
-	if typeof(parsed) != TYPE_DICTIONARY:
+	var dec := _decode("scene_event", NS_SCENE + "SceneEventBatchEnvelope", bytes)
+	if not dec.ok:
+		return   # 不是 MSE1(或坏包):场景 Room 上只应有 MSE1
+	var batch: Dictionary = dec.data
+	if str(batch.get("visibility", "")) != "PUBLIC":
 		return
-	if str(parsed.get("topic", "")) != TOPIC_PUBLIC:
-		return
-	var seq := int(parsed.get("seq", 0))
-	# seq 回退 = 服务端序列重置(重启/多实例),客户端约定丢弃增量拉 snapshot;
-	# 这里只记录基线,由业务决定何时拉。
-	last_public_seq = seq
-	var event := str(parsed.get("event", ""))
-	if event == "scene.movement_started":
-		var m: Dictionary = parsed.get("movement_started", {})
-		movement_started.emit(int(m.get("entity_id", 0)), m, seq)
-		return
-	presence.emit(event, int(parsed.get("role_id", 0)),
-			str(parsed.get("role_name", "")), seq, parsed)
+	for e in batch.get("events", []):
+		var seq := int(e.get("stream_seq", 0))
+		# seq 回退 = 服务端序列重置(重启/多实例),客户端约定丢弃增量拉 snapshot;
+		# 这里只记录基线,由业务决定何时拉。
+		last_public_seq = seq
+		var payload: Dictionary = e.get("payload", {})
+		if payload.has("movement_started"):
+			var m: Dictionary = payload.movement_started
+			movement_started.emit(int(m.get("entity_id", 0)), m, seq)
+		elif payload.has("role_presence"):
+			var p: Dictionary = payload.role_presence
+			var event := "scene.role_entered" if bool(p.get("entered", false)) else "scene.role_left"
+			presence.emit(event, int(p.get("role_id", 0)), str(p.get("role_name", "")), seq, p)
 
 
 # --- HTTP -------------------------------------------------------------------
