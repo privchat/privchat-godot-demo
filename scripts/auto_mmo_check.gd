@@ -29,7 +29,7 @@ const MOBILE_A := "+8613800000001"
 const MOBILE_B := "+8613800000002"
 const SCENE := "l-10023-7"
 ## 后台账号(共享开发环境的种子管理员);场景是运营内容,由后台开,玩家进不了没开的场景。
-var ADMIN_API := DemoEnv.service_api().replace(":9090", ":8080") + "/admin"
+var ADMIN_API := DemoEnv.admin_base()
 const ADMIN_USER := "admin"
 const ADMIN_PASSWORD := "admin123"
 
@@ -84,10 +84,14 @@ func _run() -> void:
 		return
 	var mmo_a := DemoMmoSceneService.new()
 	root.add_child(mmo_a)
-	mmo_a.setup(a.client, a.access_token)
+	if not mmo_a.setup(a.client):
+		_fail("schemas for A")
+		return
 	var mmo_b := DemoMmoSceneService.new()
 	root.add_child(mmo_b)
-	mmo_b.setup(b.client, b.access_token)
+	if not mmo_b.setup(b.client):
+		_fail("schemas for B")
+		return
 	mmo_a.presence.connect(func(event, rid, rname, seq, _raw):
 		presence_a.append({ "event": event, "role_id": rid, "role_name": rname, "seq": seq }))
 	mmo_b.movement_started.connect(func(eid, movement, seq):
@@ -102,6 +106,11 @@ func _run() -> void:
 		_fail("ensure role B: %s" % rb.error)
 		return
 	print("roles: A=%d B=%d" % [mmo_a.role_id, mmo_b.role_id])
+	# 上一轮失败可能把角色留在场景里(甚至 IN_BATTLE):先离场,让本轮从干净状态开始。
+	mmo_a.scene_ref = SCENE
+	mmo_b.scene_ref = SCENE
+	await mmo_a.leave()
+	await mmo_b.leave()
 
 	# 没开的场景进不去:这是后台开场景这条规则在客户端看到的样子。
 	var closed: Dictionary = await mmo_a.enter("l-424242-1", a.device_id)
@@ -561,6 +570,8 @@ func _login(mobile: String, data_dir: String):
 		print("bootstrap(%s) failed: %s" % [mobile, boot_resp.error])
 		return null
 	client.logged_in_user_id = data.user_id
+	# 正式登录走 _finish_login 会设 access_token;这里绕过它,自己补上(业务服务每次请求现取)。
+	client.access_token = data.access_token
 	client.logged_in_device_id = data.device_id
 	await process_frame
 	await process_frame

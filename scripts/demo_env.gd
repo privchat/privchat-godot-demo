@@ -48,6 +48,19 @@ static func service_api() -> String:
 	return v if not v.is_empty() else DEFAULT_SERVICE_API
 
 
+## privchat-application 的应用路由根(Bearer 认证的 /app);`PRIVCHAT_APP_BASE` 覆盖。
+## 与 service_api 是两个进程、两个端口,不再靠字符串替换 :9090→:8080 推导。
+static func app_base() -> String:
+	var v := OS.get_environment("PRIVCHAT_APP_BASE").strip_edges()
+	return v if not v.is_empty() else "http://127.0.0.1:8080/app"
+
+
+## 后台路由根(/admin),同一进程;`PRIVCHAT_ADMIN_BASE` 覆盖。
+static func admin_base() -> String:
+	var v := OS.get_environment("PRIVCHAT_ADMIN_BASE").strip_edges()
+	return v if not v.is_empty() else "http://127.0.0.1:8080/admin"
+
+
 ## 服务端换密钥后不必改代码:`PRIVCHAT_SPKI_PIN` 覆盖内置值。
 static func spki_pins() -> PackedStringArray:
 	var override := OS.get_environment("PRIVCHAT_SPKI_PIN").strip_edges()

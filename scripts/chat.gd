@@ -20,6 +20,8 @@ var chat: PrivchatChatService = null
 var _rendered_message_ids := {}
 var _earliest_server_message_id: int = 0
 var _has_more_before := false
+var _pending_read_pts: int = 0
+var _read_flush_pending := false
 
 
 func _ready() -> void:
@@ -141,6 +143,9 @@ func _on_open_pressed() -> void:
 func _open_channel(cid: int, ctype: int) -> void:
 	channel_id = cid
 	channel_type = ctype
+	# 分页游标属于会话:换会话必须重置,否则「加载更早」拿着上一个会话的最小 id 去翻页。
+	_earliest_server_message_id = 0
+	_has_more_before = false
 	status_label.text = "打开会话中 ..."
 
 	# local-first 历史:本地为渲染真源,空会话自动补一次最新窗口。
@@ -221,10 +226,21 @@ func _on_send_pressed() -> void:
 
 func _on_message_received(m: Dictionary) -> void:
 	_render_stored(m)
-	# 会话开着就即时已读。
+	# 会话开着就即时已读;按帧合并成一次、只发最大 pts,免得一阵消息触发几十个并发
+	# mark_read 且低 pts 后到把已读位倒退。
 	var pts := int(m.get("pts", 0))
-	if pts > 0:
-		chat.mark_read(pts)
+	if pts > _pending_read_pts:
+		_pending_read_pts = pts
+	if _read_flush_pending:
+		return
+	_read_flush_pending = true
+	await get_tree().process_frame
+	_read_flush_pending = false
+	if not is_inside_tree() or _pending_read_pts <= 0:
+		return
+	var target := _pending_read_pts
+	_pending_read_pts = 0
+	await chat.mark_read(target)
 
 
 func _on_send_status(message_id: int, status: int, _server_message_id: int) -> void:
@@ -245,4 +261,5 @@ func _render_stored(m: Dictionary) -> void:
 	var from_uid: int = int(m.get("from_uid", 0))
 	var content: String = str(m.get("content", ""))
 	var who := "我" if from_uid == PrivchatSession.user_id else "对方(%d)" % from_uid
-	_append("[b]%s[/b]: %s" % [who, content])
+	# 消息正文是对方可控的:必须转义,否则 [img]/[url]/[font_size] 会被当成标记渲染。
+	_append("[b]%s[/b]: %s" % [who, content.replace("[", "[lb]")])

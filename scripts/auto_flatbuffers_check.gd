@@ -17,7 +17,7 @@ const MOBILE_A := "+8613800000001"
 const SCENE := "l-10023-7"
 const ROOT_INTENT := "privchat.mmorpg.scene.MoveIntentEnvelope"
 const ROOT_ACK := "privchat.mmorpg.scene.MoveIntentAck"
-var ADMIN_API := DemoEnv.service_api().replace(":9090", ":8080") + "/admin"
+var ADMIN_API := DemoEnv.admin_base()
 const ADMIN_USER := "admin"
 const ADMIN_PASSWORD := "admin123"
 
@@ -135,11 +135,15 @@ func _run() -> void:
 		return
 	var mmo := DemoMmoSceneService.new()
 	root.add_child(mmo)
-	mmo.setup(a.client, a.access_token)
+	if not mmo.setup(a.client):
+		_fail("schemas")
+		return
 	var ra: Dictionary = await mmo.ensure_role("godot-a-%d" % a.user_id)
 	if not ra.ok:
 		_fail("ensure role: %s" % ra.error)
 		return
+	mmo.scene_ref = SCENE
+	await mmo.leave()
 	# 场景是运营内容,由后台开(与 auto_mmo_check 同一前置)。
 	var admin_token := await _admin_login()
 	if admin_token.is_empty() or not (await _admin_post(admin_token, "/mmo/scenes", { "scene_ref": SCENE })).ok:
@@ -209,6 +213,8 @@ func _login(mobile: String, data_dir: String):
 	if not (await client.connect_im()).ok or not (await client.bootstrap_sync()).ok:
 		return null
 	client.logged_in_user_id = data.user_id
+	# 正式登录走 _finish_login 会设 access_token;这里绕过它,自己补上(业务服务每次请求现取)。
+	client.access_token = data.access_token
 	client.logged_in_device_id = data.device_id
 	await process_frame
 	return { "client": client, "user_id": data.user_id, "device_id": data.device_id, "access_token": data.access_token }

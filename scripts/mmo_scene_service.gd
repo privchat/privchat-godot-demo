@@ -40,6 +40,9 @@ const ROUTE_BATTLE_EVENT := "mmorpg/battle/event"
 
 ## 定点坐标:1 = 1/1000 世界单位,原点左上,+x 右 +y 下;三端一律向零取整。
 const FIXED := 1000
+## 序号回退超过这个幅度视为服务端序列重置,而不是 Room 历史回放。
+const RESET_GAP := 1000
+const APP_TIMEOUT_SECS := 15.0
 
 ## 场景公共事件(已去重)。event 是 "scene.role_entered" / "scene.role_left"。
 signal presence(event: String, role_id: int, role_name: String, seq: int, raw: Dictionary)
@@ -47,6 +50,10 @@ signal presence(event: String, role_id: int, role_name: String, seq: int, raw: D
 signal movement_started(entity_id: int, movement: Dictionary, seq: int)
 ## 重连后自动重订阅的结果。
 signal rejoined(ok: bool, error: String)
+## PUBLIC 场景事件流出现漏号或序列重置:本地增量不可信,业务应拉一次 snapshot 对齐。
+signal scene_resync_needed(reason: String)
+## 战斗事件流(PUBLIC 或 PRIVATE)出现漏号:业务应拉一次 battle snapshot。
+signal battle_resync_needed(reason: String)
 ## 战斗 PUBLIC 事件(BattleEventBatchEnvelope 里的一条 BattleEvent;已按 stream_seq 去重)。
 ## payload 是单键对象:phase_changed / initiative_resolved / damage_dealt / actor_died / battle_settled。
 signal battle_event(battle_id: int, event: Dictionary, stream_seq: int)
@@ -56,8 +63,7 @@ signal battle_private_event(battle_id: int, event: Dictionary, stream_seq: int)
 
 var client: PrivchatClient = null
 var sub: PrivchatSubscription = null
-var app_base: String = "http://127.0.0.1:8080/app"
-var access_token: String = ""
+var app_base: String = preload("res://scripts/demo_env.gd").app_base()
 
 var role_id: int = 0
 var scene_ref: String = ""
@@ -70,6 +76,7 @@ var last_public_seq: int = 0
 var movement_seq: int = 0
 
 var _next_request: int = 1
+var _session_nonce: int = 0
 
 ## 通用 FlatBuffers codec 与各 root 的 schema handle(按 .bfbs 文件名索引)。
 var codec = null
@@ -86,35 +93,60 @@ var battle_private_seq: int = 0
 var action_seq: int = 0
 
 
-func setup(p_client: PrivchatClient, p_access_token: String) -> void:
+## 返回 false = 协议 schema 没加载成(缺文件 / 摘要不符),这个服务不可用,调用方必须放弃,
+## 而不是让第一个心跳在 10 秒后以"Invalid access to key"崩掉。
+## `p_access_token` 保留签名兼容但不再使用:token 会被刷新,每次请求从 client 现取。
+func setup(p_client: PrivchatClient, p_access_token: String = "") -> bool:
 	client = p_client
-	access_token = p_access_token
 	sub = PrivchatSubscription.new()
 	add_child(sub)
 	sub.setup(client)
 	sub.message_received.connect(_on_message)
 	sub.resubscribed.connect(func(ok, err): rejoined.emit(ok, err))
-	_load_schemas()
+	_session_nonce = randi()
+	return _load_schemas()
 
 
 ## 加载并按摘要固定 .bfbs;摘要不符即拒绝,不允许"差不多的协议"跑起来。
-func _load_schemas() -> void:
+const SCHEMA_NAMES := ["scene_heartbeat_request", "scene_heartbeat_ack", "scene_move_intent", "scene_move_ack",
+		"scene_interact_request", "scene_interact_ack", "scene_event",
+		"battle_command", "battle_command_ack", "battle_instant_request", "battle_instant_ack", "battle_event"]
+
+
+## SHA256SUMS 是 `shasum -a 256` 的格式:每行 "<digest>  <file>"。按**文件名**取摘要比对,
+## 而不是在整个文件里找子串——后者任何一行的摘要都能配上任何一个文件名。
+static func pinned_digests(text: String) -> Dictionary:
+	var out := {}
+	for line in text.split("\n", false):
+		var parts := line.strip_edges().split(" ", false)
+		if parts.size() >= 2:
+			out[parts[parts.size() - 1].get_file()] = parts[0]
+	return out
+
+
+func _load_schemas() -> bool:
 	codec = PrivchatFlatBuffers.new()
-	var sums := FileAccess.get_file_as_string("res://protocol/bfbs/SHA256SUMS")
-	for name in ["scene_heartbeat_request", "scene_heartbeat_ack", "scene_move_intent", "scene_move_ack",
-			"scene_interact_request", "scene_interact_ack", "scene_event",
-			"battle_command", "battle_command_ack", "battle_instant_request", "battle_instant_ack", "battle_event"]:
-		var r: Dictionary = codec.load_schema(FileAccess.get_file_as_bytes("res://protocol/bfbs/%s.bfbs" % name))
+	var pins := pinned_digests(FileAccess.get_file_as_string("res://protocol/bfbs/SHA256SUMS"))
+	var ok := true
+	for name in SCHEMA_NAMES:
+		var file := "%s.bfbs" % name
+		var r: Dictionary = codec.load_schema(FileAccess.get_file_as_bytes("res://protocol/bfbs/%s" % file))
 		if not r.ok:
-			push_error("load %s.bfbs: %s" % [name, r.error])
+			push_error("load %s: %s" % [file, r.error])
+			ok = false
 			continue
-		if not sums.contains(str(r.schema.get_digest())):
-			push_error("%s.bfbs digest %s is not pinned" % [name, r.schema.get_digest()])
+		if pins.get(file, "") != str(r.schema.get_digest()):
+			push_error("%s digest %s is not the pinned %s" % [file, r.schema.get_digest(), str(pins.get(file, "<missing>"))])
+			ok = false
 			continue
 		schemas[name] = r.schema
+	return ok
 
 
 func _encode(schema_name: String, root: String, value: Dictionary) -> PackedByteArray:
+	if not schemas.has(schema_name):
+		push_error("schema %s not loaded" % schema_name)
+		return PackedByteArray()
 	var r: Dictionary = codec.encode(schemas[schema_name], root, value)
 	if not r.ok:
 		push_error("encode %s: %s" % [root, r.error])
@@ -123,6 +155,8 @@ func _encode(schema_name: String, root: String, value: Dictionary) -> PackedByte
 
 
 func _decode(schema_name: String, root: String, bytes: PackedByteArray) -> Dictionary:
+	if not schemas.has(schema_name):
+		return { "ok": false, "error": "schema %s not loaded" % schema_name, "data": {} }
 	return codec.decode(schemas[schema_name], bytes, root)
 
 
@@ -178,8 +212,11 @@ func leave() -> Dictionary:
 	var resp: Dictionary = await _app("POST", "/mmo/scene/%s/leave" % scene_ref, { "role_id": role_id })
 	if sub.is_subscribed():
 		await sub.unsubscribe()
-	if resp.ok:
-		scene_session_id = 0
+	# 本地状态无条件清掉:已经退订了 Room,再留着 scene_session_id 只会让心跳循环
+	# 每 10 秒报一次"not subscribed"。服务端那条会话由心跳超时回收。
+	scene_session_id = 0
+	if not resp.ok:
+		push_warning("leave %s failed (%d): %s — local state cleared anyway" % [scene_ref, resp.code, resp.error])
 	return resp
 
 
@@ -391,9 +428,11 @@ func _on_battle_message(_payload_text: String, bytes: PackedByteArray, _topic: S
 		return
 	for e in dec.data.get("events", []):
 		var seq := int(e.get("stream_seq", 0))
-		# Room 会回放历史广播;按 stream_seq 去重,漏号则由业务拉 snapshot。
+		# Room 会回放历史广播;按 stream_seq 去重,漏号则通知业务拉 snapshot。
 		if seq <= battle_public_seq:
 			continue
+		if battle_public_seq > 0 and seq > battle_public_seq + 1:
+			battle_resync_needed.emit("public gap %d..%d" % [battle_public_seq + 1, seq - 1])
 		battle_public_seq = seq
 		battle_event.emit(bid, e, seq)
 
@@ -411,6 +450,9 @@ func _on_battle_transfer(route: String, _payload_text: String, bytes: PackedByte
 		var seq := int(e.get("stream_seq", 0))
 		if seq <= battle_private_seq:
 			continue
+		if battle_private_seq > 0 and seq > battle_private_seq + 1:
+			# 定向 transfer 没有回放:漏了就是真漏了(比如订阅前那一批)。拉 snapshot 补。
+			battle_resync_needed.emit("private gap %d..%d" % [battle_private_seq + 1, seq - 1])
 		battle_private_seq = seq
 		battle_private_event.emit(battle_id, e, seq)
 
@@ -434,7 +476,9 @@ func transfer_fb(route: String, req_schema: String, req_root: String, payload: D
 	if target_channel == 0:
 		return { "ok": false, "code": -1, "data": {}, "error": "not subscribed" }
 	var body := payload.duplicate()
-	body["request_id"] = "gd-%d-%d" % [role_id, _next_request]
+	# request_id 是服务端的幂等键:不能只用 role_id+计数,否则重启进程后第一条会撞上
+	# 上一次会话缓存的同名请求,被当成回放。加一个进程随机 nonce。
+	body["request_id"] = "gd-%d-%08x-%d" % [role_id, _session_nonce, _next_request]
 	_next_request += 1
 	var bytes := _encode(req_schema, req_root, body)
 	if bytes.is_empty():
@@ -454,7 +498,7 @@ func transfer(route: String, payload: Dictionary, timeout_ms: int = 8000) -> Dic
 	if sub == null or not sub.is_subscribed():
 		return { "ok": false, "code": -1, "data": {}, "error": "not in a scene" }
 	var body := payload.duplicate()
-	body["request_id"] = "gd-%d-%d" % [role_id, _next_request]
+	body["request_id"] = "gd-%d-%08x-%d" % [role_id, _session_nonce, _next_request]
 	_next_request += 1
 	var resp: Dictionary = await client.transfer(sub.channel_id, route, body, timeout_ms)
 	return _parse_transfer(resp)
@@ -491,8 +535,18 @@ func _on_message(_payload_text: String, bytes: PackedByteArray, _topic: String,
 		return
 	for e in batch.get("events", []):
 		var seq := int(e.get("stream_seq", 0))
-		# seq 回退 = 服务端序列重置(重启/多实例),客户端约定丢弃增量拉 snapshot;
-		# 这里只记录基线,由业务决定何时拉。
+		if seq <= last_public_seq:
+			# Room 对迟到的订阅者回放历史,重连后整段历史会再来一遍:按序号去重。
+			# 但序号**大幅**回退(服务端重启从 1 重排)不是重放,是序列重置——按 spec
+			# 丢弃本地增量、通知业务拉 snapshot,并接受新的基线。
+			if last_public_seq - seq > RESET_GAP:
+				last_public_seq = seq
+				scene_resync_needed.emit("sequence reset")
+			else:
+				continue
+		elif last_public_seq > 0 and seq > last_public_seq + 1:
+			# 漏号:中间的广播没收到,本地状态不可信。
+			scene_resync_needed.emit("gap %d..%d" % [last_public_seq + 1, seq - 1])
 		last_public_seq = seq
 		var payload: Dictionary = e.get("payload", {})
 		if payload.has("movement_started"):
@@ -510,10 +564,13 @@ func _on_message(_payload_text: String, bytes: PackedByteArray, _topic: String,
 ## (21400-21416 / 21600-21613),与 transfer 路径同一套数字。
 func _app(method: String, path: String, body = null) -> Dictionary:
 	var req := HTTPRequest.new()
+	# 没有超时的话,应用停顿一次就让调用方的协程永远挂起(战斗面板冻在最后一帧)。
+	req.timeout = APP_TIMEOUT_SECS
 	add_child(req)
 	var headers := PackedStringArray([
 		"Content-Type: application/json",
-		"Authorization: Bearer %s" % access_token,
+		# token 会被刷新,每次现取,不能在 setup 时拷一份用到底。
+		"Authorization: Bearer %s" % client.access_token,
 	])
 	var m := HTTPClient.METHOD_GET if method == "GET" else HTTPClient.METHOD_POST
 	var payload := "" if body == null else JSON.stringify(body)

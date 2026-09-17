@@ -30,6 +30,11 @@ var map_data = null
 var npcs: Dictionary = {}
 ## 服务端时钟 - 本地时钟(ms),由 snapshot 的 server_time_ms 估计。
 var clock_offset_ms: int = 0
+var _snapshot_pending := false
+var _battle_refreshing := false
+var _battle_refresh_again := false
+var _exiting_battle := false
+var _leaving := false
 
 
 func _ready() -> void:
@@ -97,7 +102,11 @@ func _build_ui() -> void:
 func _start() -> void:
 	service = MmoSceneService.new()
 	add_child(service)
-	service.setup(PrivchatSession.client, PrivchatSession.client.access_token)
+	if not service.setup(PrivchatSession.client):
+		status_label.text = "协议 schema 加载失败(见控制台):场景不可用"
+		return
+	service.scene_resync_needed.connect(func(reason): _log("场景事件流 %s,拉 snapshot" % reason); _schedule_snapshot())
+	service.battle_resync_needed.connect(func(reason): _log("战斗事件流 %s,拉 snapshot" % reason); _refresh_battle())
 	service.presence.connect(_on_presence)
 	service.movement_started.connect(_on_movement_started)
 	service.battle_event.connect(_on_battle_event)
@@ -219,12 +228,24 @@ func _start_battle(npc_id: int, npc_name: String) -> void:
 func _refresh_battle() -> void:
 	if service == null or not service.in_battle():
 		return
+	# 单飞:四条事件路径可能在同一帧各自要求刷新;并发的两个快照哪个后到哪个覆盖,
+	# 会把旧回合的 phase_version 留在按钮上,下一次提交就是 21402。
+	if _battle_refreshing:
+		_battle_refresh_again = true
+		return
+	_battle_refreshing = true
 	var snap: Dictionary = await service.battle_private_snapshot()
+	_battle_refreshing = false
+	if not is_inside_tree() or service == null:
+		return
 	if not snap.ok:
 		if snap.code == 21400:
 			await _exit_battle()
 		else:
 			_log("[color=red]战斗快照失败(%d):%s[/color]" % [snap.code, snap.error])
+		return
+	# 只接受不比手里更旧的快照。
+	if battle_snapshot != null and int(snap.data.state_version) < int(battle_snapshot.state_version):
 		return
 	battle_snapshot = snap.data
 	var lines: PackedStringArray = []
@@ -256,6 +277,10 @@ func _refresh_battle() -> void:
 			b.text = { "ATTACK": "攻击", "DEFEND": "防御", "ESCAPE": "逃跑", "WAIT": "等待" }.get(str(kind), str(kind))
 			b.pressed.connect(_on_command.bind(slot, str(kind)))
 			battle_buttons.add_child(b)
+	if _battle_refresh_again:
+		_battle_refresh_again = false
+		await _refresh_battle()
+		return
 	var give_up := Button.new()
 	give_up.text = "认输"
 	give_up.pressed.connect(func():
@@ -296,8 +321,13 @@ func _on_battle_event(_bid: int, event: Dictionary, _seq: int) -> void:
 		match key:
 			"damage_dealt":
 				var src: String = str(names.get(str(int(body.source_actor_id)), body.source_actor_id))
-				var dst: String = str(names.get(str(int(body.resolved_target_ids[0])), body.resolved_target_ids[0]))
-				_log("%s 对 %s 造成 %d 伤害%s" % [src, dst, int(body.amounts[0]), "(目标已倒,改选)" if str(body.retarget_reason) == "TARGET_DEAD" else ""])
+				var targets: Array = body.get("resolved_target_ids", [])
+				var amounts: Array = body.get("amounts", [])
+				if targets.is_empty():
+					_log("%s 的攻击没有命中任何目标" % src)
+				else:
+					var dst: String = str(names.get(str(int(targets[0])), targets[0]))
+					_log("%s 对 %s 造成 %d 伤害%s" % [src, dst, int(amounts[0]) if not amounts.is_empty() else 0, "(目标已倒,改选)" if str(body.retarget_reason) == "TARGET_DEAD" else ""])
 			"actor_died":
 				_log("%s 倒下了" % str(names.get(str(int(body.actor_id)), body.actor_id)))
 			"phase_changed":
@@ -322,21 +352,46 @@ func _on_battle_private_event(_bid: int, event: Dictionary, _seq: int) -> void:
 
 ## 退出战斗的正路(§7.2 / §15.2):先重新 enter 场景拿新 ticket,再退订战斗 Room。
 func _exit_battle() -> void:
+	# 单飞 + 存活检查:玩家可能已经按了「返回」(service 被释放),或者 21400 路径和
+	# 「回到场景」按钮同时触发;重复 enter 会白白多 bump 一次 epoch,更糟的是在 leave
+	# 之后又把角色送回场景,菜单里的人在地图上站到心跳超时。
+	if _exiting_battle or service == null or not is_inside_tree() or service.scene_session_id == 0:
+		return
+	_exiting_battle = true
 	battle_panel.visible = false
 	battle_snapshot = null
 	var back: Dictionary = await service.enter(SCENE_REF, PrivchatSession.device_id)
+	if service == null or not is_inside_tree():
+		return
 	if not back.ok:
 		_log("[color=red]回到场景失败(%d):%s[/color]" % [back.code, back.error])
 	await service.leave_battle()
+	_exiting_battle = false
+	if service == null or not is_inside_tree():
+		return
 	await _refresh_snapshot()
 	_log("回到场景 epoch=%d" % service.session_epoch)
 
 
-func _on_presence(event: String, role_id: int, role_name: String, _seq: int, _raw: Dictionary) -> void:
+## snapshot 请求按帧合并:重连回放几十条 role_entered 不该发几十个并发请求,
+## 它们各自 roles.clear() 再填充,互相清空对方的结果,地图闪烁掉人。
+func _schedule_snapshot() -> void:
+	if _snapshot_pending:
+		return
+	_snapshot_pending = true
+	await get_tree().process_frame
+	_snapshot_pending = false
+	if is_inside_tree() and service != null:
+		await _refresh_snapshot()
+
+
+func _on_presence(event: String, role_id: int, role_name: String, _seq: int, raw: Dictionary) -> void:
 	if event == "scene.role_entered":
 		_log("%s 进入场景" % role_name)
-		# 进入事件不带位置;拉一次 snapshot 拿到出生点与在途路径。
-		await _refresh_snapshot()
+		# RolePresence 自带进入位置;直接落到 roles,不必为每个进入事件拉一次 snapshot。
+		var pos: Dictionary = raw.get("position", {})
+		roles[role_id] = { "name": role_name, "position": Vector2i(int(pos.get("x", 0)), int(pos.get("y", 0))), "entity_version": 0 }
+		map_view.queue_redraw()
 	elif event == "scene.role_left":
 		_log("%s 离开场景" % role_name)
 		roles.erase(role_id)
@@ -361,8 +416,13 @@ func is_my_role(rid: int) -> bool:
 
 
 func _process(_delta: float) -> void:
-	if map_view != null:
-		map_view.queue_redraw()
+	# 只有有人在路上才需要逐帧重画;静止时 queue_redraw 由事件触发。
+	if map_view == null:
+		return
+	for rid in roles:
+		if roles[rid].has("movement"):
+			map_view.queue_redraw()
+			return
 
 
 func _log(line: String) -> void:
@@ -370,11 +430,27 @@ func _log(line: String) -> void:
 
 
 func _on_back_pressed() -> void:
-	if service != null:
-		await service.leave()
-		await service.close()
-		service = null
+	if _leaving:
+		return
+	_leaving = true
+	await _teardown()
 	get_tree().change_scene_to_file("res://scenes/menu.tscn")
+
+
+func _teardown() -> void:
+	if service == null:
+		return
+	var s = service
+	service = null
+	await s.leave()
+	await s.close()
+
+
+## 强制登出 / 会话过期会直接切场景,不经过「返回」:这里保证 Room 退订、会话释放。
+func _exit_tree() -> void:
+	if service != null and not _leaving:
+		_leaving = true
+		_teardown()
 
 
 # --- 地图视图 ---------------------------------------------------------------

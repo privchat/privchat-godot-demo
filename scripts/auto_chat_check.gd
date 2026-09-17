@@ -176,17 +176,26 @@ func _run() -> void:
 	print("mark_read -> last_read_pts=%d, unread=0, unread_changed x%d" % [mark_resp.last_read_pts, unread_events.size()])
 
 	print("== [5/6] channel_list 含频道且未读归零 ==")
-	var list_resp: Dictionary = await chat_b.channel_list()
-	if not list_resp.ok:
-		_fail("channel_list: %s" % list_resp.error)
-		return
+	# SDK 的发布屏障:对端身份还没落到本地 user 表(名字解析为空)的 DM 不进会话列表,
+	# 等定向 hydration 完成才一起出现(privchat-sdk f2a2ca5)。所以这里要等,而不是
+	# 一拍即取;对端账号必须有 nickname/username,否则永远不会出现。
+	var list_resp: Dictionary = {}
 	var entry := {}
-	for c in list_resp.channels:
-		if int(c.get("channel_id", -1)) == channel_id:
-			entry = c
-			break
+	var list_deadline := Time.get_ticks_msec() + 15000
+	while entry.is_empty() and Time.get_ticks_msec() < list_deadline:
+		list_resp = await chat_b.channel_list()
+		if not list_resp.ok:
+			_fail("channel_list: %s" % list_resp.error)
+			return
+		for c in list_resp.channels:
+			if int(c.get("channel_id", -1)) == channel_id:
+				entry = c
+				break
+		if entry.is_empty():
+			await create_timer(0.5).timeout
 	if entry.is_empty():
-		_fail("channel %d missing from channel_list" % channel_id)
+		print("channel_list returned %d entries: %s" % [list_resp.channels.size(), JSON.stringify(list_resp.channels)])
+		_fail("channel %d missing from channel_list (peer has no resolvable name, or hydration never ran)" % channel_id)
 		return
 	if int(entry.get("unread_count", -1)) != 0:
 		_fail("channel_list unread_count should be 0, got %s" % str(entry.get("unread_count")))
