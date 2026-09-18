@@ -36,6 +36,7 @@ const ROUTE_INTERACT := "mmorpg/scene/interact"
 const ROUTE_BATTLE_COMMAND := "mmorpg/battle/command"
 const ROUTE_BATTLE_INSTANT := "mmorpg/battle/instant"
 const TOPIC_BATTLE_PUBLIC := "mmorpg.battle.public"
+const TOPIC_SCENE_PUBLIC := "mmorpg.scene.public"
 const ROUTE_BATTLE_EVENT := "mmorpg/battle/event"
 
 ## 定点坐标:1 = 1/1000 世界单位,原点左上,+x 右 +y 下;三端一律向零取整。
@@ -418,8 +419,10 @@ func surrender(state_version: int) -> Dictionary:
 	}, "battle_instant_ack", NS_BATTLE + "BattleInstantAck", battle_channel_id)
 
 
-func _on_battle_message(_payload_text: String, bytes: PackedByteArray, _topic: String,
+func _on_battle_message(_payload_text: String, bytes: PackedByteArray, topic: String,
 		_publisher: String, _sid: int, _ts: int) -> void:
+	if not topic.is_empty() and topic != TOPIC_BATTLE_PUBLIC:
+		return
 	var dec := _decode("battle_event", NS_BATTLE + "BattleEventBatchEnvelope", bytes)
 	if not dec.ok or str(dec.data.get("visibility", "")) != "PUBLIC":
 		return
@@ -525,8 +528,11 @@ func _parse_transfer(resp: Dictionary) -> Dictionary:
 
 # --- 事件 -------------------------------------------------------------------
 
-func _on_message(_payload_text: String, bytes: PackedByteArray, _topic: String,
+func _on_message(_payload_text: String, bytes: PackedByteArray, topic: String,
 		_publisher: String, _sid: int, _ts: int) -> void:
+	# 服务端给广播帧打了 topic 就按 topic 分流;没打(老服务端)才退回按 identifier 猜。
+	if not topic.is_empty() and topic != TOPIC_SCENE_PUBLIC:
+		return
 	var dec := _decode("scene_event", NS_SCENE + "SceneEventBatchEnvelope", bytes)
 	if not dec.ok:
 		return   # 不是 MSE1(或坏包):场景 Room 上只应有 MSE1

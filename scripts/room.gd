@@ -5,7 +5,7 @@
 # （server 配了 [room_ticket]），由业务后台签发后填入下方 ticket 输入框。
 extends Control
 
-const ROOM_CHANNEL_TYPE := 2
+const ROOM_CHANNEL_TYPE := 3  # wire 值:Direct=1/Group=2/Room=3
 
 var channel_edit: LineEdit
 var ticket_edit: LineEdit
