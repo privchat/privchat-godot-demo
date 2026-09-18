@@ -18,7 +18,7 @@ const MOBILE_B := "+8613800000002"
 # 与网关同实例,统一由 DemoEnv 决定,避免两处各改一半。
 var SERVICE_API := DemoEnv.service_api()
 const SERVICE_KEY := "your_service_master_key_here"
-const DIRECT_CHANNEL_TYPE := 1
+const DIRECT_CHANNEL_TYPE := PrivchatClient.ChannelType.DIRECT
 
 var room_msgs: Array = []
 var rejoin_events: Array = []

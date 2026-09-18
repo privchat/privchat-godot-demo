@@ -107,7 +107,7 @@ func _run() -> void:
 
 	print("== [4/4] logout 清空 pending ==")
 	session.pending_channel_id = 999999
-	session.pending_channel_type = 3
+	session.pending_channel_type = PrivchatClient.ChannelType.ROOM
 	session.logout()
 	_check(session.pending_channel_id == 0 and session.pending_channel_type == 0,
 			"logout clears pending channel context")
